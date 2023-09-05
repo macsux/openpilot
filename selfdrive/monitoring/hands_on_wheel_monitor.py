@@ -47,5 +47,5 @@ class HandsOnWheelStatus():
       # hands off wheel for acceptable period of time.
       self.hands_on_wheel_state = HandsOnWheelState.minor
 
-    if alert is not None:
-      events.add(alert)
+    # if alert is not None:
+    #   events.add(alert)

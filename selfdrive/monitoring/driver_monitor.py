@@ -193,35 +193,6 @@ class DriverStatus():
 
   def _get_distracted_types(self):
     distracted_types = []
-
-    if not self.pose_calibrated:
-      pitch_error = self.pose.pitch - self.settings._PITCH_NATURAL_OFFSET
-      yaw_error = self.pose.yaw - self.settings._YAW_NATURAL_OFFSET
-    else:
-      pitch_error = self.pose.pitch - min(max(self.pose.pitch_offseter.filtered_stat.mean(),
-                                                       self.settings._PITCH_MIN_OFFSET), self.settings._PITCH_MAX_OFFSET)
-      yaw_error = self.pose.yaw - min(max(self.pose.yaw_offseter.filtered_stat.mean(),
-                                                    self.settings._YAW_MIN_OFFSET), self.settings._YAW_MAX_OFFSET)
-    pitch_error = 0 if pitch_error > 0 else abs(pitch_error) # no positive pitch limit
-    yaw_error = abs(yaw_error)
-    if pitch_error > (self.settings._POSE_PITCH_THRESHOLD*self.pose.cfactor_pitch if self.pose_calibrated else self.settings._PITCH_NATURAL_THRESHOLD) or \
-       yaw_error > self.settings._POSE_YAW_THRESHOLD*self.pose.cfactor_yaw:
-      distracted_types.append(DistractedType.DISTRACTED_POSE)
-
-    if (self.blink.left_blink + self.blink.right_blink)*0.5 > self.settings._BLINK_THRESHOLD:
-      distracted_types.append(DistractedType.DISTRACTED_BLINK)
-
-    if self.ee1_calibrated:
-      ee1_dist = self.eev1 > max(min(self.ee1_offseter.filtered_stat.M, self.settings._EE_MAX_OFFSET1), self.settings._EE_MIN_OFFSET1) * self.settings._EE_THRESH12
-    else:
-      ee1_dist = self.eev1 > self.settings._EE_THRESH11
-    # if self.ee2_calibrated:
-    #   ee2_dist = self.eev2 < self.ee2_offseter.filtered_stat.M * self.settings._EE_THRESH22
-    # else:
-    #   ee2_dist = self.eev2 < self.settings._EE_THRESH21
-    if ee1_dist:
-      distracted_types.append(DistractedType.DISTRACTED_E2E)
-
     return distracted_types
 
   def set_policy(self, model_data, car_speed):
@@ -335,5 +306,5 @@ class DriverStatus():
       # pre green alert
       alert = EventName.preDriverDistracted if self.active_monitoring_mode else EventName.preDriverUnresponsive
 
-    if alert is not None:
-      events.add(alert)
+    # if alert is not None:
+    #   events.add(alert)

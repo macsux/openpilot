@@ -368,8 +368,8 @@ class CarInterfaceBase(ABC):
 
     if cs_out.doorOpen and (c.latActive or c.longActive):
       events.add(EventName.doorOpen)
-    if cs_out.seatbeltUnlatched and cs_out.gearShifter != GearShifter.park:
-      events.add(EventName.seatbeltNotLatched)
+    #if cs_out.seatbeltUnlatched and cs_out.gearShifter != GearShifter.park:
+    #  events.add(EventName.seatbeltNotLatched)
     if cs_out.gearShifter != GearShifter.drive and cs_out.gearShifter not in extra_gears and not \
             (cs_out.gearShifter == GearShifter.unknown and self.gear_warning < int(0.5/DT_CTRL)):
       if cs_out.vEgo < 5:
@@ -511,8 +511,7 @@ class CarInterfaceBase(ABC):
 
     cs_out.belowLaneChangeSpeed = cs_out.vEgo < LANE_CHANGE_SPEED_MIN and self.below_speed_pause
 
-    if cs_out.gearShifter in [GearShifter.park, GearShifter.reverse] or cs_out.doorOpen or \
-      (cs_out.seatbeltUnlatched and cs_out.gearShifter != GearShifter.park):
+    if cs_out.gearShifter in [GearShifter.park, GearShifter.reverse] or cs_out.doorOpen:
       gear_allowed = False
 
     cs_out.latActive = gear_allowed

@@ -875,9 +875,8 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
   EventName.noGps: {
   },
 
-  EventName.tooDistracted: {
-    ET.NO_ENTRY: NoEntryAlert("Distraction Level Too High"),
-  },
+  # macsux-tweaks R1: no driver-distraction engagement gate.
+  EventName.tooDistracted: {},
 
   EventName.excessiveActuation: {
     ET.SOFT_DISABLE: soft_disable_alert("Excessive Actuation"),
@@ -918,15 +917,11 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
     ET.NO_ENTRY: NoEntryAlert("Remount Detected: Recalibrating"),
   },
 
-  # macsux-tweaks R1: do not disengage mid-drive when door opens or seatbelt
-  # unlatches. NO_ENTRY still blocks engaging from those states.
-  EventName.doorOpen: {
-    ET.NO_ENTRY: NoEntryAlert("Door Open"),
-  },
+  # macsux-tweaks R1: door / seatbelt are not engagement gates.
+  # No alerts, no NO_ENTRY block, no SOFT_DISABLE on transition.
+  EventName.doorOpen: {},
 
-  EventName.seatbeltNotLatched: {
-    ET.NO_ENTRY: NoEntryAlert("Seatbelt Unlatched"),
-  },
+  EventName.seatbeltNotLatched: {},
 
   EventName.espDisabled: {
     ET.SOFT_DISABLE: soft_disable_alert("Electronic Stability Control Disabled"),

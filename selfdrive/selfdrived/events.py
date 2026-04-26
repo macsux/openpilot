@@ -637,53 +637,14 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.LOW, VisualAlert.steerRequired, AudibleAlert.prompt, 1.8),
   },
 
-  EventName.driverDistracted1: {
-    ET.PERMANENT: Alert(
-      "Pay Attention",
-      "",
-      AlertStatus.normal, AlertSize.small,
-      Priority.LOW, VisualAlert.none, AudibleAlert.preAlert, .1),
-  },
-
-  EventName.driverDistracted2: {
-    ET.PERMANENT: Alert(
-      "Pay Attention",
-      "Driver Distracted",
-      AlertStatus.userPrompt, AlertSize.mid,
-      Priority.MID, VisualAlert.steerRequired, AudibleAlert.promptDistracted, .1),
-  },
-
-  EventName.driverDistracted3: {
-    ET.PERMANENT: Alert(
-      "DISENGAGE IMMEDIATELY",
-      "Driver Distracted",
-      AlertStatus.critical, AlertSize.full,
-      Priority.HIGH, VisualAlert.steerRequired, AudibleAlert.warningImmediate, .1),
-  },
-
-  EventName.driverUnresponsive1: {
-    ET.PERMANENT: Alert(
-      "Touch Steering Wheel: No Face Detected",
-      "",
-      AlertStatus.normal, AlertSize.small,
-      Priority.LOW, VisualAlert.steerRequired, AudibleAlert.none, .1),
-  },
-
-  EventName.driverUnresponsive2: {
-    ET.PERMANENT: Alert(
-      "Touch Steering Wheel",
-      "Driver Unresponsive",
-      AlertStatus.userPrompt, AlertSize.mid,
-      Priority.MID, VisualAlert.steerRequired, AudibleAlert.promptDistracted, .1),
-  },
-
-  EventName.driverUnresponsive3: {
-    ET.PERMANENT: Alert(
-      "DISENGAGE IMMEDIATELY",
-      "Driver Unresponsive",
-      AlertStatus.critical, AlertSize.full,
-      Priority.HIGH, VisualAlert.steerRequired, AudibleAlert.warningImmediate, .1),
-  },
+  # macsux-tweaks R1c: silence ALL driver-monitoring visual/audible alerts.
+  # Camera-based DM on c3 is unreliable enough that the alerts are net-noise.
+  EventName.driverDistracted1: {},
+  EventName.driverDistracted2: {},
+  EventName.driverDistracted3: {},
+  EventName.driverUnresponsive1: {},
+  EventName.driverUnresponsive2: {},
+  EventName.driverUnresponsive3: {},
 
   EventName.manualRestart: {
     ET.WARNING: Alert(
@@ -733,13 +694,10 @@ EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
     ET.WARNING: changing_lanes_alert,
   },
 
-  EventName.steerSaturated: {
-    ET.WARNING: Alert(
-      "Take Control",
-      "Turn Exceeds Steering Limit",
-      AlertStatus.userPrompt, AlertSize.mid,
-      Priority.LOW, VisualAlert.steerRequired, AudibleAlert.promptRepeat, 2.),
-  },
+  # macsux-tweaks R1c: silence the "Take Control / Turn Exceeds Steering Limit"
+  # alert that fires constantly on tight turns. openpilot still does its best,
+  # the warning was just visual noise.
+  EventName.steerSaturated: {},
 
   # Thrown when the fan is driven at >50% but is not rotating
   EventName.fanMalfunction: {
@@ -1170,13 +1128,8 @@ STARPILOT_EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
     ET.WARNING: forcing_stop_alert,
   },
 
-  StarPilotEventName.goatSteerSaturated: {
-    ET.WARNING: Alert(
-      "JESUS TAKE THE WHEEL!!",
-      "Turn Exceeds Steering Limit",
-      AlertStatus.userPrompt, AlertSize.mid,
-      Priority.LOW, VisualAlert.steerRequired, StarPilotAudibleAlert.goat, 2.),
-  },
+  # macsux-tweaks R1c: silence themed steer-saturated variants
+  StarPilotEventName.goatSteerSaturated: {},
 
   StarPilotEventName.greenLight: {
     ET.PERMANENT: Alert(
@@ -1362,13 +1315,7 @@ STARPILOT_EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.LOW, VisualAlert.none, StarPilotAudibleAlert.dejaVu, 4.),
   },
 
-  StarPilotEventName.firefoxSteerSaturated: {
-    ET.WARNING: Alert(
-      "IE Has Stopped Responding...",
-      "Turn Exceeds Steering Limit",
-      AlertStatus.userPrompt, AlertSize.mid,
-      Priority.LOW, VisualAlert.steerRequired, StarPilotAudibleAlert.firefox, 4.),
-  },
+  StarPilotEventName.firefoxSteerSaturated: {},
 
   StarPilotEventName.hal9000: {
     ET.WARNING: Alert(
@@ -1392,13 +1339,7 @@ STARPILOT_EVENTS: dict[int, dict[str, Alert | AlertCallbackType]] = {
       Priority.HIGHEST, VisualAlert.none, StarPilotAudibleAlert.fart, 10.),
   },
 
-  StarPilotEventName.thisIsFineSteerSaturated: {
-    ET.WARNING: Alert(
-      "This is fine ☕",
-      "Turn Exceeds Steering Limit",
-      AlertStatus.userPrompt, AlertSize.mid,
-      Priority.LOW, VisualAlert.steerRequired, StarPilotAudibleAlert.thisIsFine, 2.),
-  },
+  StarPilotEventName.thisIsFineSteerSaturated: {},
 
   StarPilotEventName.toBeContinued: {
     ET.PERMANENT: Alert(
@@ -1478,13 +1419,8 @@ if HARDWARE.get_device_type() == 'mici':
         AlertStatus.userPrompt, AlertSize.small,
         Priority.LOW, VisualAlert.none, AudibleAlert.prompt, .1),
     },
-    EventName.steerSaturated: {
-      ET.WARNING: Alert(
-        "take control",
-        "turn exceeds limit",
-        AlertStatus.userPrompt, AlertSize.mid,
-        Priority.LOW, VisualAlert.steerRequired, AudibleAlert.promptRepeat, 2.),
-    },
+    # macsux-tweaks R1c: also silence StarPilot's lowercase variant
+    EventName.steerSaturated: {},
     EventName.calibrationIncomplete: {
       ET.PERMANENT: calibration_incomplete_alert,
       ET.SOFT_DISABLE: soft_disable_alert("Calibration Incomplete"),

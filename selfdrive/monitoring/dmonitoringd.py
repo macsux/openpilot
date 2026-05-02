@@ -21,6 +21,7 @@ def dmonitoringd_thread():
   sm = sm.extend(['starpilotCarState'])
 
   driver_view_enabled = params.get_bool("IsDriverViewEnabled")
+  disable_dm = params.get_bool("DisableDriverMonitoring")
 
   # 20Hz <- dmonitoringmodeld
   while True:
@@ -39,11 +40,27 @@ def dmonitoringd_thread():
 
     # publish
     dat = DM.get_state_packet(valid=valid or driver_view_enabled)
+
+    # macsux-tweaks R1d: when DisableDriverMonitoring=1, override the published
+    # verdict fields so every downstream consumer sees an attentive driver.
+    # Pose/blink/std fields are left intact so debug telemetry isn't blinded.
+    if disable_dm:
+      s = dat.driverMonitoringState
+      s.faceDetected = True
+      s.isDistracted = False
+      s.distractedType = 0
+      s.awarenessStatus = 1.0
+      s.awarenessActive = 1.0
+      s.awarenessPassive = 1.0
+      s.isLowStd = False
+      s.events = []
+
     pm.send('driverMonitoringState', dat)
 
     # load live always-on toggle
     if sm['driverStateV2'].frameId % 40 == 1:
       DM.always_on = params.get_bool("AlwaysOnDM")
+      disable_dm = params.get_bool("DisableDriverMonitoring")
       demo_mode = params.get_bool("IsDriverViewEnabled") and sm["carState"].gearShifter != GearShifter.reverse
 
     # save rhd virtual toggle every 5 mins

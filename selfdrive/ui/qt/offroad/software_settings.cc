@@ -143,8 +143,6 @@ void SoftwarePanel::updateLabels() {
   StarPilotUIState &fs = *starpilotUIState();
   StarPilotUIScene &starpilot_scene = fs.starpilot_scene;
 
-  bool parked = starpilot_scene.parked || isFrogsGoMoo();
-
   // add these back in case the files got removed
   fs_watch->addParam("LastUpdateTime");
   fs_watch->addParam("UpdateFailedCount");

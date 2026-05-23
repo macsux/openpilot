@@ -54,7 +54,11 @@ class RadarInterface(RadarInterfaceBase):
 
     ret = structs.RadarData()
     header = self.rcp.vl[RADAR_HEADER_MSG]
-    fault = header['FLRRSnsrBlckd'] or header['FLRRSnstvFltPrsntInt'] or \
+    # FLRRSnsrBlckd (sensor blocked, e.g. rain/spray) is intentionally NOT treated as a
+    # hard radarFault. A blocked radar simply reports no targets; radard then falls back to
+    # vision-model leads instead of disengaging and refusing to re-engage ("Radar Error:
+    # Restart the Car"). Genuine hardware/alignment/sensitivity faults still fault out.
+    fault = header['FLRRSnstvFltPrsntInt'] or \
       header['FLRRYawRtPlsblityFlt'] or header['FLRRHWFltPrsntInt'] or \
       header['FLRRAntTngFltPrsnt'] or header['FLRRAlgnFltPrsnt']
     if not self.rcp.can_valid:

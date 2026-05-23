@@ -474,7 +474,8 @@ def main() -> None:
 
         update_failed_count += 1
 
-        if manual_update_requested or user_requested_action or (params.get_bool("IsOffroad") and automatic_updates_enabled):
+        # gate removed: automatic updates no longer require IsOffroad (allowed onroad too)
+        if manual_update_requested or user_requested_action or automatic_updates_enabled:
           # check for update
           params.put("UpdaterState", "checking...")
           updater.check_for_update()
@@ -491,10 +492,7 @@ def main() -> None:
             updater.fetch_update()
             write_time_to_param(params, "UpdaterLastFetchTime")
         else:
-          if not params.get_bool("IsOffroad"):
-            cloudlog.info("skipping fetch, vehicle is onroad")
-          else:
-            cloudlog.info("skipping fetch, automatic updates disabled")
+          cloudlog.info("skipping fetch, automatic updates disabled")
         update_failed_count = 0
       except subprocess.CalledProcessError as e:
         cloudlog.event(

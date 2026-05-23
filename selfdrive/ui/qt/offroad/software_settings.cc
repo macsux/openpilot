@@ -156,9 +156,9 @@ void SoftwarePanel::updateLabels() {
     return;
   }
 
-  // updater only runs offroad or when parked
-  onroadLbl->setVisible(is_onroad && !parked);
-  downloadBtn->setVisible(!is_onroad || parked);
+  // gate removed: allow downloading/installing updates regardless of onroad/parked state
+  onroadLbl->setVisible(false);
+  downloadBtn->setVisible(true);
 
   // download update
   QString updater_state = QString::fromStdString(params.get("UpdaterState"));
@@ -194,7 +194,7 @@ void SoftwarePanel::updateLabels() {
   versionLbl->setText(QString::fromStdString(params.get("UpdaterCurrentDescription")));
   versionLbl->setDescription(QString::fromStdString(params.get("UpdaterCurrentReleaseNotes")));
 
-  installBtn->setVisible((!is_onroad || parked) && params.getBool("UpdateAvailable"));
+  installBtn->setVisible(params.getBool("UpdateAvailable"));
   installBtn->setValue(QString::fromStdString(params.get("UpdaterNewDescription")));
   installBtn->setDescription(QString::fromStdString(params.get("UpdaterNewReleaseNotes")));
 

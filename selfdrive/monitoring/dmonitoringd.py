@@ -39,6 +39,17 @@ def dmonitoringd_thread():
 
     # publish
     dat = DM.get_state_packet(valid=valid or driver_view_enabled)
+    # macsux-tweaks: disable DM at source (hardcoded; no param, no params_pyx rebuild)
+    _s = dat.driverMonitoringState
+    _s.faceDetected = True
+    _s.isDistracted = False
+    _s.distractedType = 0
+    _s.awarenessStatus = 1.0
+    _s.awarenessActive = 1.0
+    _s.awarenessPassive = 1.0
+    _s.isLowStd = False
+    _s.events = []
+
     pm.send('driverMonitoringState', dat)
 
     # load live always-on toggle

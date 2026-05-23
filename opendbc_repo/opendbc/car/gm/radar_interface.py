@@ -54,9 +54,9 @@ class RadarInterface(RadarInterfaceBase):
 
     ret = structs.RadarData()
     header = self.rcp.vl[RADAR_HEADER_MSG]
-    # FLRRSnsrBlckd (sensor blocked, e.g. rain/spray) is intentionally NOT treated as a
-    # hard radarFault. A blocked radar simply reports no targets; radard then falls back to
-    # vision-model leads instead of disengaging and refusing to re-engage ("Radar Error:
+    # FLRRSnsrBlckd (sensor blocked, e.g. rain/spray) is reported as radarUnavailableTemporary
+    # rather than a hard radarFault: openpilot falls back to vision-model leads and keeps driving
+    # (the UI shows a "vision mode" eye icon) instead of refusing to engage ("Radar Error:
     # Restart the Car"). Genuine hardware/alignment/sensitivity faults still fault out.
     fault = header['FLRRSnstvFltPrsntInt'] or \
       header['FLRRYawRtPlsblityFlt'] or header['FLRRHWFltPrsntInt'] or \
@@ -65,6 +65,8 @@ class RadarInterface(RadarInterfaceBase):
       ret.errors.canError = True
     if fault:
       ret.errors.radarFault = True
+    if header['FLRRSnsrBlckd']:
+      ret.errors.radarUnavailableTemporary = True
 
     currentTargets = set()
     num_targets = header['FLRRNumValidTargets']

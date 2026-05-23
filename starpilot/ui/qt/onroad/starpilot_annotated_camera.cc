@@ -20,6 +20,7 @@ StarPilotAnnotatedCameraWidget::StarPilotAnnotatedCameraWidget(QWidget *parent) 
   stopSignImg = loadPixmap("../../starpilot/assets/other_images/stop_sign.png", {btn_size, btn_size});
   turnIcon = loadPixmap("../../starpilot/assets/other_images/turn_icon.png", {widget_size, widget_size});
   visionIcon = loadPixmap("../../starpilot/assets/other_images/speed_icon.png", {btn_size / 2, btn_size / 2}).scaled(iconSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+  visionModeIcon = loadPixmap("../../selfdrive/assets/icons/eye_open.png", {btn_size, btn_size});
 
   loadGif("../../starpilot/assets/other_images/curve_icon.gif", cemCurveIcon, QSize(widget_size, widget_size), this);
   loadGif("../../starpilot/assets/other_images/lead_icon.gif", cemLeadIcon, QSize(widget_size, widget_size), this);
@@ -172,6 +173,7 @@ void StarPilotAnnotatedCameraWidget::updateState(const UIState &s, const StarPil
   desiredFollowDistance = starpilotPlan.getDesiredFollowDistance();
   experimentalMode = selfdriveState.getExperimentalMode();
   forceCoast = starpilotCarState.getForceCoast();
+  visionMode = sm.alive("radarState") && sm["radarState"].getRadarState().getRadarErrors().getRadarUnavailableTemporary();
   laneWidthLeft = starpilotPlan.getLaneWidthLeft();
   laneWidthRight = starpilotPlan.getLaneWidthRight();
   lateralPaused = starpilotCarState.getPauseLateral();
@@ -346,6 +348,36 @@ void StarPilotAnnotatedCameraWidget::paintStarPilotWidgets(QPainter &p, UIState 
   if (!hideBottomIcons) {
     paintWeather(p);
   }
+
+  if (!hideBottomIcons && visionMode) {
+    paintVisionMode(p);
+  }
+}
+
+// Bottom-right "vision mode" indicator: shown when the radar is reporting blocked
+// (radarUnavailableTemporary) and openpilot is running on vision-model leads.
+void StarPilotAnnotatedCameraWidget::paintVisionMode(QPainter &p) {
+  if (visionModeIcon.isNull()) {
+    return;
+  }
+
+  p.save();
+
+  const int margin = UI_BORDER_SIZE * 2;
+  const int iw = visionModeIcon.width();
+  const int ih = visionModeIcon.height();
+  QRect iconRect(rect().right() - iw - margin, rect().bottom() - ih - margin, iw, ih);
+
+  // dark rounded backdrop so the eye reads against any scene
+  QRect bgRect = iconRect.adjusted(-24, -16, 24, 16);
+  p.setPen(Qt::NoPen);
+  p.setBrush(blackColor(150));
+  p.drawRoundedRect(bgRect, 24, 24);
+
+  p.setOpacity(0.95);
+  p.drawPixmap(iconRect, visionModeIcon);
+
+  p.restore();
 }
 
 void StarPilotAnnotatedCameraWidget::paintAdjacentPaths(QPainter &p) {

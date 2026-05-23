@@ -368,11 +368,13 @@ class SelfdriveD:
           self.events.add(EventName.cameraFrameRate)
     if not REPLAY and self.rk.lagging:
       self.events.add(EventName.selfdrivedLagging)
-    if self.sm['radarState'].radarErrors.canError:
+    radar_errors = self.sm['radarState'].radarErrors
+    if radar_errors.canError:
       self.events.add(EventName.canError)
-    elif self.sm['radarState'].radarErrors.radarUnavailableTemporary:
-      self.events.add(EventName.radarTempUnavailable)
-    elif any(self.sm['radarState'].radarErrors.to_dict().values()):
+    # radarUnavailableTemporary is a non-blocking "vision mode" flag (e.g. GM radar blocked by
+    # rain/spray): openpilot keeps driving on vision-model leads and the UI shows an eye icon,
+    # so it must NOT raise a disabling/no-entry event. Real faults still fault out below.
+    elif any(v for k, v in radar_errors.to_dict().items() if k != 'radarUnavailableTemporary'):
       self.events.add(EventName.radarFault)
     if not self.sm.valid['pandaStates']:
       self.events.add(EventName.usbError)

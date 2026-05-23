@@ -74,6 +74,7 @@ private:
   void paintStandstillTimer(QPainter &p);
   void paintStoppingPoint(QPainter &p);
   void paintTurnSignals(QPainter &p);
+  void paintVisionMode(QPainter &p);
   void paintWeather(QPainter &p);
   void updateSignals();
 
@@ -90,6 +91,7 @@ private:
   bool longitudinalPaused;
   bool redLight;
   bool speedLimitChanged;
+  bool visionMode;
   bool weatherDaytime;
 
   int animationFrameIndex;
@@ -146,6 +148,7 @@ private:
   QPixmap stopSignImg;
   QPixmap turnIcon;
   QPixmap visionIcon;
+  QPixmap visionModeIcon;
 
   QPoint cemStatusPosition;
   QPoint compassPosition;

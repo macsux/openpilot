@@ -33,6 +33,10 @@ function agnos_init {
   # StarPilot variables
   sudo chmod 0777 /cache
 
+  # macsux: keep the device reachable off-LAN via Tailscale. Detached so a slow first-time
+  # download never delays boot; node identity lives in /data/tailscale (see the script).
+  "$DIR/system/tailscale/ensure_tailscale.sh" >/dev/null 2>&1 &
+
   # Weston loads display color correction from /data/misc/display/color_cal/color_cal.
   # Prefer a factory /persist/comma/color_cal blob when present. Otherwise, derive a
   # Weston-compatible calibration blob from the device's legacy dwo gamma tables.

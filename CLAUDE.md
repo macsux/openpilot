@@ -19,6 +19,7 @@ Never install or push code that targets only `tizi` (comma 3X) or comma 4 AGNOS 
 ## Customizations live on macsux-tweaks
 1. **R1: stop disengaging on door open / seatbelt unlatched.** `selfdrive/selfdrived/events.py` — removed `ET.SOFT_DISABLE` for `EventName.doorOpen` and `EventName.seatbeltNotLatched`. NO_ENTRY still blocks engaging from those states; mid-drive the system stays engaged.
 2. **R1b: kill the "needs internet / hasn't been updated" offroad prompts.** `system/updated/updated.py` — removed the conditional re-set of `Offroad_UpdateFailed`/`Offroad_ConnectivityNeeded`/`Offroad_ConnectivityNeededPrompt`; the unconditional clear earlier in `set_params()` keeps the alerts hidden permanently.
+3. **Tailscale remote access.** `system/tailscale/ensure_tailscale.sh`, hooked from `agnos_init` in `launch_chffrplus.sh`. Every boot: downloads a pinned Tailscale build into `/data/tailscale/` if missing, starts `tailscaled` as a transient systemd unit (own cgroup — survives openpilot restarts; nothing written to the read-only AGNOS root), and logs in. **Credentials never live in the repo:** the node identity is `/data/tailscale/state/` on the device, created by a one-time browser login (URL lands in `/data/tailscale/login_url`). For a hands-off login on a freshly reset device, drop a pre-auth key in `/data/tailscale/authkey` — it's consumed and deleted. Node name `comma3`, IP `100.72.49.78`. Netfilter is off (AGNOS's nf_tables iptables doesn't work on the 4.9 kernel); `--accept-dns=false`.
 
 ## What's NOT a code change — toggles in StarPilot UI to flip after install
 - **Always On Lateral** (Settings → Lateral → Always On Lateral) — covers the steering-wheel-touch nag.
@@ -28,8 +29,10 @@ Never install or push code that targets only `tizi` (comma 3X) or comma 4 AGNOS 
 
 ## Iteration workflow
 See `../openpilot/research/04-iteration-workflow.md`. Key points:
+- `ssh comma` goes over Tailscale (works from anywhere the Mac has Tailscale up); `ssh comma-lan` is the phone-hotspot path (subnet rotates, `10.x.y.188`).
 - Push code via `rsync` from this dir to `comma:/data/openpilot/`.
-- Restart with `./rr.sh` (rebootless, restarts manager + children) — not `pkill controlsd`, that no longer works.
+- Restart with `ssh comma 'sudo systemctl restart comma'` — restarts the tmux session + manager + children. (There is no `rr.sh` on the device; `pkill controlsd` no longer works either.) Python edits need this full restart — manager re-forks children from its own preloaded modules, so killing a single process brings back the OLD code.
+- **Don't set "Enable Tethering" to "Only Onroad" or "Always"** (Settings → Network). StarPilot flips wlan0 into AP mode (`weedle-xxxx`) at ignition-on, which drops it off the hotspot. Keep it Off; Tailscale doesn't need it.
 - `tmux a` over SSH to watch live build/controlsd output.
 - StarPilot UI toggle "Use Precompiled Binaries": OFF during dev, ON for road-only days.
 - Build time on c3 is 10–20 min for full clean, <1 min for Python-only edits.
@@ -57,3 +60,4 @@ The research directory in the SIBLING `openpilot/` dir (the old twilsonco fork �
 1. Is the file changed in `macsux-tweaks` and not yet pushed to the device? (`git diff StarPilot..macsux-tweaks`).
 2. Is the device running a stale `prebuilt` marker? (`ssh comma 'ls -la /data/openpilot/prebuilt'` — if it exists, scons skips rebuilding).
 3. Did `manager` actually restart? (check `tmux a` output for the rebanner).
+4. Can't reach the device? `ssh comma` needs Tailscale up on the Mac; check `tailscale status` for `comma3`. On the device, `/data/tailscale/ensure.log` says what the bring-up did.

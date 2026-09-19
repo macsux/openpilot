@@ -51,6 +51,10 @@ function agnos_init {
   # StarPilot variables
   sudo chmod 0777 /cache
 
+  # macsux: keep the device reachable off-LAN via Tailscale. Detached so a slow first-time
+  # download never delays boot; node identity lives in /data/tailscale (see the script).
+  "$DIR/system/tailscale/ensure_tailscale.sh" >/dev/null 2>&1 &
+
   # Check if AGNOS update is required
   AGNOS_CURRENT_VERSION="$(< /VERSION)"
   AGNOS_UPDATE_REQUIRED=1

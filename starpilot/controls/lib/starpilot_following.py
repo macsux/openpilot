@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import numpy as np
 
+from openpilot.common.realtime import DT_MDL
+
 from openpilot.common.constants import CV
-from openpilot.selfdrive.controls.lib.lead_behavior import compute_gap_coast, should_disable_far_lead_throttle
+from openpilot.selfdrive.controls.lib.lead_behavior import compute_gap_coast, gap_coast_danger, recover_t_follow, should_disable_far_lead_throttle
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import COMFORT_BRAKE, LEAD_DANGER_FACTOR, desired_follow_distance, get_jerk_factor, get_T_FOLLOW
 
 from openpilot.starpilot.common.starpilot_variables import CITY_SPEED_LIMIT, MAX_T_FOLLOW
@@ -21,6 +23,7 @@ class StarPilotFollowing:
     self.disable_throttle = False
     self.following_lead = False
     self.gap_coast = False
+    self.gap_coast_t_follow = 0.0
     self.slower_lead = False
 
     self.acceleration_jerk = 0
@@ -110,9 +113,15 @@ class StarPilotFollowing:
                                                         starpilot_toggles.stop_distance, COMFORT_BRAKE, self.gap_coast)
       if self.gap_coast:
         self.disable_throttle = True
-        self.desired_follow_distance = int(desired_follow_distance(v_ego, lead.vLead, self.t_follow))
+      else:
+        # coming out of a coast: ramp the target gap back rather than stepping it (unless it's urgent)
+        danger = gap_coast_danger(v_ego, lead.dRel, lead.vLead, lead.aLeadK, starpilot_toggles.stop_distance)
+        self.t_follow = recover_t_follow(self.t_follow, self.gap_coast_t_follow, DT_MDL, danger)
+      self.gap_coast_t_follow = self.t_follow
+      self.desired_follow_distance = int(desired_follow_distance(v_ego, lead.vLead, self.t_follow))
     else:
       self.gap_coast = False
+      self.gap_coast_t_follow = 0.0
 
   def update_follow_values(self, lead_distance, v_ego, v_lead, starpilot_toggles):
     if starpilot_toggles.human_following and v_lead > v_ego:

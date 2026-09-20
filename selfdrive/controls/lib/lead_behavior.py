@@ -58,6 +58,7 @@ def should_disable_far_lead_throttle(v_ego: float, lead_distance: float, desired
 GAP_COAST_MIN_SPEED = 5.0          # m/s; below this stop/creep logic owns the gap
 GAP_COAST_MIN_HEADWAY = 0.9        # s; hard floor on top of stop_distance
 GAP_COAST_MARGIN = 1.0             # m; keep the MPC's target a hair under the real gap
+GAP_COAST_RECOVER_RATE = 0.3       # s of t_follow per second: how fast the target gap grows back after a coast
 
 
 def gap_coast_thresholds(v_ego: float, coasting: bool) -> tuple[float, float, float]:
@@ -91,3 +92,19 @@ def compute_gap_coast(v_ego: float, lead_distance: float, v_lead: float, a_lead:
   t_eq = (lead_distance - GAP_COAST_MARGIN - stop_distance - brake_term) / v_ego
   t_eff = min(max(t_eq, GAP_COAST_MIN_HEADWAY), t_follow)
   return True, t_eff
+
+
+def gap_coast_danger(v_ego: float, lead_distance: float, v_lead: float, a_lead: float, stop_distance: float) -> bool:
+  """True when the lead situation needs braking now: no gradual recovery of the target gap."""
+  closing = v_ego - v_lead
+  ttc = lead_distance / closing if closing > 0.1 else float("inf")
+  floor_gap = stop_distance + GAP_COAST_MIN_HEADWAY * v_ego
+  return ttc < 6.0 or a_lead < -1.5 or lead_distance < floor_gap
+
+
+def recover_t_follow(t_follow: float, prev_t_follow: float, dt: float, danger: bool) -> float:
+  """After a coast, grow the target gap back at GAP_COAST_RECOVER_RATE so braking builds up
+  progressively instead of stepping in; a dangerous lead skips the ramp."""
+  if danger or prev_t_follow <= 0.0 or prev_t_follow >= t_follow:
+    return t_follow
+  return min(t_follow, prev_t_follow + GAP_COAST_RECOVER_RATE * dt)

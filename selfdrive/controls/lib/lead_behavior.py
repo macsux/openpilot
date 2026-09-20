@@ -59,6 +59,10 @@ GAP_COAST_MIN_SPEED = 5.0          # m/s; below this stop/creep logic owns the g
 GAP_COAST_MIN_HEADWAY = 0.9        # s; hard floor on top of stop_distance
 GAP_COAST_MARGIN = 1.0             # m; keep the MPC's target a hair under the real gap
 GAP_COAST_RECOVER_RATE = 0.3       # s of t_follow per second: how fast the target gap grows back after a coast
+# Deadband around the target gap so steady following (which lives right at the target) never
+# trips the coast: enter only when clearly inside the target, leave once nearly back at it.
+GAP_COAST_ENTER_FRAC, GAP_COAST_ENTER_MIN_M = 0.08, 3.0
+GAP_COAST_EXIT_FRAC, GAP_COAST_EXIT_MIN_M = 0.02, 1.0
 
 
 def gap_coast_thresholds(v_ego: float, coasting: bool) -> tuple[float, float, float]:
@@ -79,7 +83,11 @@ def compute_gap_coast(v_ego: float, lead_distance: float, v_lead: float, a_lead:
   brake_term = (v_ego ** 2 - v_lead ** 2) / (2.0 * comfort_brake)
   desired_gap = brake_term + t_follow * v_ego + stop_distance
   floor_gap = stop_distance + GAP_COAST_MIN_HEADWAY * v_ego
-  if not (floor_gap < lead_distance < desired_gap):
+  if coasting:
+    upper = desired_gap - max(GAP_COAST_EXIT_MIN_M, GAP_COAST_EXIT_FRAC * desired_gap)
+  else:
+    upper = desired_gap - max(GAP_COAST_ENTER_MIN_M, GAP_COAST_ENTER_FRAC * desired_gap)
+  if not (floor_gap < lead_distance < upper):
     return False, t_follow
 
   closing = v_ego - v_lead

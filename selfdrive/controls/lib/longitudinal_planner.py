@@ -13,6 +13,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import Longi
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import STOP_DISTANCE
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N
+from openpilot.selfdrive.controls.lib.lead_behavior import gap_coast_danger, limit_accel_jerk
 from openpilot.selfdrive.car.cruise import V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
 
@@ -154,6 +155,7 @@ class LongitudinalPlanner:
     self.generation = None
 
     self.a_desired = init_a
+    self.prev_output_a_target = init_a  # macsux: jerk limiter state
     self.v_desired_filter = FirstOrderFilter(init_v, 2.0, self.dt)
     self.v_model_error = 0.0
     self.output_a_target = 0.0
@@ -302,6 +304,7 @@ class LongitudinalPlanner:
       self.v_desired_filter.x = v_ego
       # Clip aEgo to cruise limits to prevent large accelerations when becoming active
       self.a_desired = np.clip(sm['carState'].aEgo, accel_limits[0], accel_limits[1])
+      self.prev_output_a_target = float(self.a_desired)
       self.model_allow_throttle = True
 
     # Prevent divergence, smooth in current v_ego
@@ -551,6 +554,21 @@ class LongitudinalPlanner:
 
     output_accel_max = no_throttle_output_max if not self.allow_throttle else accel_limits_turns[1]
     output_a_target = float(np.clip(output_a_target, output_accel_min, output_accel_max))
+
+    # macsux: bounded jerk so braking builds (and eases) progressively instead of stepping to
+    # the decel floor or to a throttle cap. Anything urgent goes straight through: a close or
+    # braking lead, FCW, StarPilot's close-lead brake cap, or a hard brake request.
+    urgent = bool(self.fcw or close_lead_caps or output_a_target < -1.5)
+    if not urgent and lead_control_active:
+      stop_distance = float(getattr(starpilot_toggles, "stop_distance", STOP_DISTANCE))
+      for lead in (self.lead_one, self.lead_two):
+        if lead.status and gap_coast_danger(v_ego, lead.dRel, lead.vLead, lead.aLeadK, stop_distance):
+          urgent = True
+          break
+    limited = limit_accel_jerk(output_a_target, self.prev_output_a_target, self.dt, v_ego, urgent)
+    # a cap that just dropped (throttle inhibit, turn limit) is approached at the jerk rate, not snapped to
+    output_a_target = float(np.clip(limited, output_accel_min, max(output_accel_max, self.prev_output_a_target)))
+    self.prev_output_a_target = output_a_target
 
     self.output_a_target = output_a_target
     self.output_should_stop = bool(output_should_stop)

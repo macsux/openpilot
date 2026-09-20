@@ -116,3 +116,20 @@ def recover_t_follow(t_follow: float, prev_t_follow: float, dt: float, danger: b
   if danger or prev_t_follow <= 0.0 or prev_t_follow >= t_follow:
     return t_follow
   return min(t_follow, prev_t_follow + GAP_COAST_RECOVER_RATE * dt)
+
+
+# macsux: bounded jerk on the planner's output so braking builds up progressively (and eases
+# off progressively) like a human foot, instead of stepping between "pull" and the decel floor.
+ACCEL_JERK_DOWN = 0.6   # m/s^3 toward more braking (+0.5 -> -0.5 takes ~1.7 s, 0 -> -0.5 ~0.8 s)
+ACCEL_JERK_UP = 1.0     # m/s^3 toward less braking / more throttle
+ACCEL_JERK_MIN_SPEED = 5.0  # m/s; below this the stop/creep logic owns the pedal
+
+
+def limit_accel_jerk(target: float, prev: float, dt: float, v_ego: float, urgent: bool) -> float:
+  """Rate-limit the change of the commanded accel. `urgent` (close/braking lead, FCW, hard brake
+  request) passes the target straight through."""
+  if urgent or v_ego < ACCEL_JERK_MIN_SPEED:
+    return target
+  lo = prev - ACCEL_JERK_DOWN * dt
+  hi = prev + ACCEL_JERK_UP * dt
+  return min(max(target, lo), hi)

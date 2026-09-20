@@ -2,7 +2,7 @@
 import numpy as np
 
 from openpilot.common.constants import CV
-from openpilot.selfdrive.controls.lib.lead_behavior import should_disable_far_lead_throttle
+from openpilot.selfdrive.controls.lib.lead_behavior import compute_gap_coast, should_disable_far_lead_throttle
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import COMFORT_BRAKE, LEAD_DANGER_FACTOR, desired_follow_distance, get_jerk_factor, get_T_FOLLOW
 
 from openpilot.starpilot.common.starpilot_variables import CITY_SPEED_LIMIT, MAX_T_FOLLOW
@@ -20,6 +20,7 @@ class StarPilotFollowing:
 
     self.disable_throttle = False
     self.following_lead = False
+    self.gap_coast = False
     self.slower_lead = False
 
     self.acceleration_jerk = 0
@@ -97,6 +98,21 @@ class StarPilotFollowing:
       self.desired_follow_distance = int(desired_follow_distance(v_ego, self.starpilot_planner.lead_one.vLead, self.t_follow))
     else:
       self.desired_follow_distance = 0
+
+    # macsux: inside the target gap but not closing (cut-in pulling away, or we crept a bit
+    # close) -> lift off and let the gap regrow instead of braking to restore it. The MPC's
+    # target gap is pinned just under the real gap so it has nothing to brake for; rapid
+    # closing, a braking lead or a gap under the floor drop straight back to normal braking.
+    lead = self.starpilot_planner.lead_one
+    if long_control_active and self.starpilot_planner.tracking_lead and lead.status and \
+        not sm["starpilotCarState"].trafficModeEnabled:
+      self.gap_coast, self.t_follow = compute_gap_coast(v_ego, lead.dRel, lead.vLead, lead.aLeadK, self.t_follow,
+                                                        starpilot_toggles.stop_distance, COMFORT_BRAKE, self.gap_coast)
+      if self.gap_coast:
+        self.disable_throttle = True
+        self.desired_follow_distance = int(desired_follow_distance(v_ego, lead.vLead, self.t_follow))
+    else:
+      self.gap_coast = False
 
   def update_follow_values(self, lead_distance, v_ego, v_lead, starpilot_toggles):
     if starpilot_toggles.human_following and v_lead > v_ego:

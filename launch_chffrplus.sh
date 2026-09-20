@@ -55,6 +55,15 @@ function agnos_init {
   # download never delays boot; node identity lives in /data/tailscale (see the script).
   "$DIR/system/tailscale/ensure_tailscale.sh" >/dev/null 2>&1 &
 
+  # macsux: AGNOS's comma.sh offers a factory reset when the screen has been tapped 5+ times
+  # at "boot", guarded only by /tmp/booted. The device clock is bogus at boot, so tmpfiles
+  # cleanup (D /tmp ... 30d, 15 min after boot) sees that marker as months old and deletes
+  # it; every later `systemctl restart comma` then re-runs the check and shows the wipe
+  # prompt. Exclude the marker from cleanup and make sure it exists.
+  sudo mkdir -p /run/tmpfiles.d
+  echo "x /tmp/booted" | sudo tee /run/tmpfiles.d/keep-booted.conf >/dev/null
+  touch /tmp/booted
+
   # Check if AGNOS update is required
   AGNOS_CURRENT_VERSION="$(< /VERSION)"
   AGNOS_UPDATE_REQUIRED=1

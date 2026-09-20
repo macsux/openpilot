@@ -32,6 +32,7 @@ See `../openpilot/research/04-iteration-workflow.md`. Key points:
 - `ssh comma` goes over Tailscale (works from anywhere the Mac has Tailscale up); `ssh comma-lan` is the phone-hotspot path (subnet rotates, `10.x.y.188`).
 - Push code via `rsync` from this dir to `comma:/data/openpilot/`.
 - Restart with `ssh comma 'sudo systemctl restart comma'` — restarts the tmux session + manager + children. (There is no `rr.sh` on the device; `pkill controlsd` no longer works either.) Python edits need this full restart — manager re-forks children from its own preloaded modules, so killing a single process brings back the OLD code.
+- **A "System reset triggered — erase all content and settings" screen after restarting openpilot is NOT a real reset request.** AGNOS's `comma.sh` re-runs its "5+ taps at boot → factory reset" check on every `comma.service` start once `/tmp/booted` is gone, and tmpfiles cleanup deletes that marker 15 min after boot (bogus boot clock makes it look months old). Tap **Cancel**; never Confirm. `agnos_init` now excludes the marker from cleanup, so this only recurs on a build without that fix.
 - **Don't set "Enable Tethering" to "Only Onroad" or "Always"** (Settings → Network). StarPilot flips wlan0 into AP mode (`weedle-xxxx`) at ignition-on, which drops it off the hotspot. Keep it Off; Tailscale doesn't need it.
 - `tmux a` over SSH to watch live build/controlsd output.
 - StarPilot UI toggle "Use Precompiled Binaries": OFF during dev, ON for road-only days.

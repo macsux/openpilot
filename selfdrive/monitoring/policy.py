@@ -14,6 +14,15 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 AlertLevel = log.DriverMonitoringState.AlertLevel
 MonitoringPolicy = log.DriverMonitoringState.MonitoringPolicy
 
+# macsux-tweaks: driver monitoring is disabled at the source. DriverMonitoring._update_events()
+# is the single place the distraction verdict is made (awareness, alert level, lockout
+# counters); every consumer derives from the state it sets: selfdrived's driverDistracted*/
+# driverUnresponsive*/tooDistracted events and the DriverTooDistracted latch, controlsd's
+# forceDecel (noResponseForceDecel), alwaysOnLockout, the "driver camera uncertain" offroad
+# alert, and the UI awareness bars. Perception (_update_states: face/pose/RHD) keeps running so
+# the UI face icon and RHD detection still work. Flip to False to restore stock behaviour.
+DM_DISABLED = True
+
 def to_percent(v):
   return int(min(max(v * 100., 0.), 100.))
 
@@ -331,6 +340,19 @@ class DriverMonitoring:
       self.hi_stds = 0
 
   def _update_events(self, driver_engaged, op_engaged, lowspeed, wrong_gear):
+    if DM_DISABLED:
+      # macsux-tweaks: driver is permanently attentive; never escalate, never lock out.
+      self.alert_level = AlertLevel.none
+      self.driver_interacting = driver_engaged
+      self.alert_3_cnt = 0
+      self.cnt_since_alert_3 = 0
+      self.no_response_cnt = 0
+      self.lockout_active = False
+      self.lockout_time_elapsed = 0
+      self.dcam_uncertain_cnt = 0
+      self._reset_awareness()
+      return
+
     self.alert_level = AlertLevel.none
     self.driver_interacting = driver_engaged
 

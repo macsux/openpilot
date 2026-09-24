@@ -48,11 +48,15 @@ sys.modules["openpilot.common.constants"] = _module(
 sys.modules["openpilot.common.realtime"] = _module("openpilot.common.realtime", DT_MDL=0.05)
 sys.modules["openpilot.selfdrive.controls.lib.lead_behavior"] = _module(
   "openpilot.selfdrive.controls.lib.lead_behavior", should_disable_far_lead_throttle=lambda *_args: False,
+  compute_gap_coast=lambda _v_ego, _d_rel, _v_lead, _a_lead, t_follow, *_args: (False, t_follow),
+  gap_coast_danger=lambda *_args: False,
+  recover_t_follow=lambda t_follow, *_args: t_follow,
 )
 sys.modules["openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc"] = _module(
   "openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc",
   COMFORT_BRAKE=2.5,
   LEAD_DANGER_FACTOR=0.8,
+  STOP_DISTANCE=6.0,
   desired_follow_distance=lambda v_ego, _v_lead, t_follow: v_ego * t_follow,
   get_jerk_factor=lambda *_args: (1.0, 1.0, 1.0),
   get_T_FOLLOW=_faithful_get_t_follow,

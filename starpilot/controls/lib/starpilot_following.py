@@ -4,8 +4,10 @@ import numpy as np
 from cereal import log
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_MDL
-from openpilot.selfdrive.controls.lib.lead_behavior import should_disable_far_lead_throttle
-from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import COMFORT_BRAKE, LEAD_DANGER_FACTOR, desired_follow_distance, get_jerk_factor, get_T_FOLLOW
+from openpilot.selfdrive.controls.lib.lead_behavior import compute_gap_coast, gap_coast_danger, recover_t_follow, should_disable_far_lead_throttle
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import (
+  COMFORT_BRAKE, LEAD_DANGER_FACTOR, STOP_DISTANCE, desired_follow_distance, get_jerk_factor, get_T_FOLLOW,
+)
 
 from openpilot.starpilot.common.longitudinal_personality_profiles import active_personality_id, interpolate_category_curve, resolve_personality_category
 from openpilot.starpilot.common.starpilot_variables import CITY_SPEED_LIMIT, MAX_T_FOLLOW
@@ -41,6 +43,8 @@ class StarPilotFollowing:
 
     self.disable_throttle = False
     self.following_lead = False
+    self.gap_coast = False
+    self.gap_coast_t_follow = 0.0  # t_follow pinned by the coast, or the value still ramping back after one; 0 = idle
     self.slower_lead = False
 
     self.acceleration_jerk = 0
@@ -143,6 +147,31 @@ class StarPilotFollowing:
       self.desired_follow_distance = int(desired_follow_distance(v_ego, self.starpilot_planner.lead_one.vLead, self.t_follow))
     else:
       self.desired_follow_distance = 0
+
+    # macsux: inside the target gap but not closing (cut-in pulling away, or we crept a bit
+    # close) -> lift off and let the gap regrow instead of braking to restore it. The MPC's
+    # target gap is pinned just under the real gap so it has nothing to brake for; rapid
+    # closing, a braking lead or a gap under the floor drop straight back to normal braking.
+    # STOP_DISTANCE matches the MPC's own distance model (this base has no stop-distance toggle).
+    lead = self.starpilot_planner.lead_one
+    if long_control_active and self.starpilot_planner.tracking_lead and lead.status and \
+        not sm["starpilotCarState"].trafficModeEnabled:
+      base_t_follow = float(self.t_follow)
+      self.gap_coast, self.t_follow = compute_gap_coast(v_ego, lead.dRel, lead.vLead, lead.aLeadK, base_t_follow,
+                                                        STOP_DISTANCE, COMFORT_BRAKE, self.gap_coast)
+      if self.gap_coast:
+        self.disable_throttle = True
+        self.gap_coast_t_follow = self.t_follow
+      elif self.gap_coast_t_follow > 0.0:
+        # coming out of a coast: ramp the target gap back rather than stepping it (unless it's
+        # urgent). Only after a coast, so the lane-change gap's own snap-back stays untouched.
+        danger = gap_coast_danger(v_ego, lead.dRel, lead.vLead, lead.aLeadK, STOP_DISTANCE)
+        self.t_follow = recover_t_follow(base_t_follow, self.gap_coast_t_follow, DT_MDL, danger)
+        self.gap_coast_t_follow = self.t_follow if self.t_follow < base_t_follow else 0.0
+      self.desired_follow_distance = int(desired_follow_distance(v_ego, lead.vLead, self.t_follow))
+    else:
+      self.gap_coast = False
+      self.gap_coast_t_follow = 0.0
 
   def update_lane_change_gap(self, long_control_active, v_ego, sm, starpilot_toggles):
     # Hold a shorter follow distance while signalling out of the lane so openpilot

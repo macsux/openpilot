@@ -1,4 +1,11 @@
+import pytest
+
 from openpilot.selfdrive.controls.lib.lead_behavior import (
+  GAP_COAST_MIN_HEADWAY,
+  GAP_COAST_RECOVER_RATE,
+  compute_gap_coast,
+  gap_coast_danger,
+  recover_t_follow,
   get_tracked_lead_catchup_bias,
   is_radarless_matched_follow_window,
   should_hold_tracked_vision_lead,
@@ -243,3 +250,101 @@ def test_radarless_matched_follow_window_keeps_default_low_speed_guard():
 
 def test_radarless_matched_follow_window_accepts_lower_speed_when_requested():
   assert is_radarless_matched_follow_window(14.4, 25.4, 16.2, 1.25, radar=False, lead_brake=0.0, lead_prob=1.0, min_speed=12.0)
+
+
+# macsux gap coast. Scenario base: 30 m/s, standard 1.45 s follow, pace-matched lead.
+# desired gap = 1.45*30 + 6 = 49.5 m; floor = 0.9*30 + 6 = 33 m; enter below 45.5 m, exit above 48.5 m.
+_V, _T, _STOP, _BRAKE = 30.0, 1.45, 6.0, 2.5
+
+
+def _coast(d_rel, v_lead=_V, a_lead=0.0, coasting=False, v_ego=_V, t_follow=_T):
+  return compute_gap_coast(v_ego, d_rel, v_lead, a_lead, t_follow, _STOP, _BRAKE, coasting)
+
+
+def test_gap_coast_engages_inside_target_gap_when_not_closing():
+  coast, t_eff = _coast(40.0)
+  assert coast
+  # target gap pinned 1 m under the real gap: (40 - 1 - 6) / 30
+  assert t_eff == pytest.approx(1.1)
+
+
+def test_gap_coast_never_lengthens_t_follow():
+  coast, t_eff = _coast(45.0)
+  assert coast
+  assert t_eff < _T
+
+
+def test_gap_coast_ignores_steady_following_at_the_target_deadband():
+  coast, t_eff = _coast(47.0)
+  assert not coast
+  assert t_eff == _T
+
+
+def test_gap_coast_stays_off_under_the_headway_floor():
+  coast, t_eff = _coast(30.0)
+  assert not coast
+  assert t_eff == _T
+
+
+def test_gap_coast_clamps_to_the_headway_floor_when_barely_above_it():
+  coast, t_eff = _coast(34.0)
+  assert coast
+  assert t_eff == GAP_COAST_MIN_HEADWAY
+
+
+@pytest.mark.parametrize("v_lead, a_lead", [
+  (27.0, 0.0),    # closing 3 m/s > 1.5 m/s limit at 30 m/s
+  (30.0, -1.2),   # lead braking harder than -1.0
+])
+def test_gap_coast_hands_back_to_mpc_when_closing_or_lead_braking(v_lead, a_lead):
+  coast, t_eff = _coast(40.0, v_lead=v_lead, a_lead=a_lead)
+  assert not coast
+  assert t_eff == _T
+
+
+def test_gap_coast_tolerates_gentle_closing():
+  coast, _ = _coast(40.0, v_lead=29.0)  # closing 1 m/s, TTC 40 s
+  assert coast
+
+
+def test_gap_coast_hysteresis_holds_near_the_exit_and_loosens_thresholds():
+  assert not _coast(47.5)[0]
+  assert _coast(47.5, coasting=True)[0]
+  # 2 m/s closing is over the 1.5 m/s entry limit but under the 2.25 m/s coasting limit
+  assert not _coast(40.0, v_lead=28.0)[0]
+  assert _coast(40.0, v_lead=28.0, coasting=True)[0]
+  assert not _coast(49.0, coasting=True)[0]
+
+
+def test_gap_coast_is_off_at_low_speed_and_without_a_follow_time():
+  assert _coast(10.0, v_ego=4.0, v_lead=4.0) == (False, _T)
+  assert _coast(40.0, t_follow=0.0) == (False, 0.0)
+
+
+def test_gap_coast_uses_the_mpc_distance_model_for_a_slower_lead():
+  # a slower lead needs more room (the MPC's brake term), so the same 40 m is further inside
+  # the target and the pinned t_follow comes out shorter: (40 - 1 - 6 - 5.95) / 30
+  coast, t_eff_slower = _coast(40.0, v_lead=29.5)
+  _, t_eff_matched = _coast(40.0)
+  assert coast
+  assert t_eff_slower == pytest.approx(0.9017, abs=1e-3)
+  assert t_eff_slower < t_eff_matched
+
+
+@pytest.mark.parametrize("d_rel, v_lead, a_lead, expected", [
+  (40.0, 30.0, 0.0, False),
+  (40.0, 22.0, 0.0, True),    # TTC 5 s
+  (40.0, 30.0, -2.0, True),   # hard-braking lead
+  (30.0, 30.0, 0.0, True),    # under the floor
+])
+def test_gap_coast_danger(d_rel, v_lead, a_lead, expected):
+  assert gap_coast_danger(_V, d_rel, v_lead, a_lead, _STOP) is expected
+
+
+def test_recover_t_follow_ramps_back_and_snaps_on_danger():
+  dt = 0.05
+  assert recover_t_follow(_T, 1.1, dt, False) == pytest.approx(1.1 + GAP_COAST_RECOVER_RATE * dt)
+  assert recover_t_follow(_T, 1.44, dt, False) == _T
+  assert recover_t_follow(_T, 1.1, dt, True) == _T
+  assert recover_t_follow(_T, 0.0, dt, False) == _T
+  assert recover_t_follow(_T, 1.75, dt, False) == _T

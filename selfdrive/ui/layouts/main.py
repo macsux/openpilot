@@ -10,6 +10,7 @@ from openpilot.selfdrive.ui.layouts.home import HomeLayout
 from openpilot.selfdrive.ui.layouts.settings.settings import SettingsLayout, PanelType
 from openpilot.selfdrive.ui.onroad.starpilot.starpilot_onroad_view import StarPilotOnroadView
 from openpilot.selfdrive.ui.ui_state import device, ui_state
+from openpilot.selfdrive.ui.widgets.ha_offline_indicator import HaOfflineIndicator
 from openpilot.system.ui.widgets import Widget
 from openpilot.selfdrive.ui.layouts.onboarding import OnboardingWindow
 
@@ -28,6 +29,7 @@ class MainLayout(Widget):
 
     self._sidebar = Sidebar()
     self._dev_sidebar = DeveloperSidebar()
+    self._ha_offline = HaOfflineIndicator()
     self._current_mode = MainState.HOME
     self._prev_onroad = False
 
@@ -150,3 +152,5 @@ class MainLayout(Widget):
 
     if has_dev:
       self._dev_sidebar.render(self._dev_sidebar_rect)
+
+    self._ha_offline.render(content_rect)

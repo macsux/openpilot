@@ -31,8 +31,15 @@ Failure handling: on any socket or broker error the sender drops the session, ba
 2 s -> 60 s (logging once per failure streak), reconnects, re-publishes discovery and the
 last snapshot. Only the monotonic clock is used: the device's wall clock is bogus at boot
 and jumps when it syncs.
+
+UI status: STATUS_PATH (tmpfs) exists and is re-touched every STATUS_REFRESH_S while the
+session is up, and is removed while it is down (or when there is no config at all). The UI
+reads its mtime and shows a red Home Assistant icon when the file is missing or stale, so a
+crashed or hung daemon reads as offline too. A file rather than a param: a new param key
+needs a rebuild of the committed params_pyx.so.
 """
 import json
+import os
 import threading
 import time
 
@@ -53,6 +60,9 @@ GPS_MAX_AGE_S = 5.         # a fix older than this is not sent as a fresh onroad
 KEEPALIVE_S = 600          # MQTT keepalive: the broker declares us dead (and sends the will) after 1.5x this
 PING_IDLE_S = 240.         # send a PINGREQ when nothing has been published for this long
 CONNECT_TIMEOUT_S = 10.
+STATUS_PATH = "/dev/shm/ha_pushd_online"
+STATUS_REFRESH_S = 10.
+STATUS_STALE_S = 30.       # the UI treats an older status file as offline
 
 CLIENT_ID = "comma3-car"
 DISCOVERY_PREFIX = "homeassistant"
@@ -250,6 +260,32 @@ class Tracker:
     }
 
 
+class StatusFile:
+  """Mirrors the session state into STATUS_PATH for the UI (see the module docstring)."""
+
+  def __init__(self, path=STATUS_PATH):
+    self.path = path
+    self.online = None
+    self.last_write = None
+
+  def update(self, online, now):
+    if online == self.online and (not online or now - self.last_write < STATUS_REFRESH_S):
+      return
+    try:
+      if online:
+        with open(self.path, "a"):
+          pass
+        os.utime(self.path)
+      else:
+        try:
+          os.unlink(self.path)
+        except FileNotFoundError:
+          pass
+    except OSError:
+      return  # left as-is; retried on the next update
+    self.online, self.last_write = online, now
+
+
 def load_seed(params):
   """The fix StarPilot saves on every offroad transition; its age is unknown here (wall clock)."""
   try:
@@ -263,6 +299,8 @@ def load_seed(params):
 
 def main():
   params = Params()
+  status = StatusFile()
+  status.update(False, time.monotonic())  # a file left by a previous run says nothing about this one
 
   cfg = load_config()
   if cfg is None:
@@ -293,6 +331,8 @@ def main():
     started = bool(sm["deviceState"].started) if sm.seen["deviceState"] else False
     gear = str(sm["carState"].gearShifter) if sm.seen["carState"] else None
     v_ego = float(sm["carState"].vEgo) if sm.seen["carState"] else 0.
+
+    status.update(sender.client.connected, now)
 
     snapshot = tracker.update(now, started, gear, v_ego)
     if snapshot is not None:

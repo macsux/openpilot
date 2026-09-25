@@ -96,6 +96,45 @@ def test_no_wall_clock_in_the_daemon():
   assert "time.time(" not in inspect.getsource(ha_pushd)
 
 
+# ----------------------------------------------------------------------------- UI status file
+
+def test_status_file_exists_while_online_is_retouched_and_removed_when_offline(tmp_path):
+  import os
+  path = tmp_path / "ha_online"
+  status = ha_pushd.StatusFile(str(path))
+
+  status.update(True, 100.)
+  assert path.exists()
+  os.utime(path, (1., 1.))
+  status.update(True, 100. + ha_pushd.STATUS_REFRESH_S - 1)
+  assert path.stat().st_mtime == 1.  # not rewritten every loop
+  status.update(True, 100. + ha_pushd.STATUS_REFRESH_S)
+  assert path.stat().st_mtime > 1.   # re-touched, so the UI doesn't see it go stale
+
+  status.update(False, 200.)
+  assert not path.exists()
+  status.update(False, 201.)         # already gone: no error
+
+
+def test_ui_reads_missing_or_stale_status_as_offline(tmp_path):
+  import os
+  _stub_if_missing("pyray", Rectangle=object)
+  _stub_if_missing("openpilot.system.ui.lib.application", gui_app=None)
+  indicator = importlib.import_module("openpilot.selfdrive.ui.widgets.ha_offline_indicator")
+
+  path = tmp_path / "ha_online"
+  reader = indicator.HaStatusReader(str(path))
+  assert not reader.online(0.)
+  path.touch()
+  assert reader.online(1.)
+  assert reader.online(1. + ha_pushd.STATUS_STALE_S)
+  assert not reader.online(2. + ha_pushd.STATUS_STALE_S)  # never re-touched: daemon hung or died
+  os.utime(path, ns=(path.stat().st_mtime_ns + 10**9,) * 2)
+  assert reader.online(3. + ha_pushd.STATUS_STALE_S)      # touched again: back online
+  path.unlink()
+  assert not reader.online(4. + ha_pushd.STATUS_STALE_S)
+
+
 # ----------------------------------------------------------------------------- Sender (MQTT)
 
 class _FakeBroker:

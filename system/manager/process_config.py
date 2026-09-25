@@ -223,6 +223,7 @@ else:
 
 procs += [
   PythonProcess("device_syncd", "starpilot.system.device_syncd", always_run),
+  PythonProcess("ha_pushd", "starpilot.system.ha_pushd", always_run, enabled=TICI, nice=19),
   PythonProcess("starpilot_process", "starpilot.starpilot_process", always_run),
   PythonProcess("mapd", "starpilot.navigation.mapd_wrapper", run_mapd, nice=19),
   PythonProcess("navigationd", "starpilot.navigation.navigationd", run_navigationd, nice=19),

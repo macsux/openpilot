@@ -256,9 +256,12 @@ def main():
   params = Params()
 
   url = load_config()
+  if url is None:
+    cloudlog.warning(f"ha_pushd: no config at {CONFIG_PATH} ({{\"url\", \"webhook_id\"}}); nothing is pushed until it appears")
   while url is None:
     time.sleep(60)
     url = load_config()
+  cloudlog.info(f"ha_pushd: pushing to {url.rsplit('/', 1)[0]}/<webhook>")
 
   sender = Sender(url)
   sender.start()

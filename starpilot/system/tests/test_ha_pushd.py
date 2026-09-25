@@ -1,11 +1,12 @@
-"""ha_pushd: the push decisions (Tracker) and the sender's HA webhook handling, against a
-local stand-in for Home Assistant's mobile_app webhook."""
+"""ha_pushd: the push decisions (Tracker) and the MQTT sender, against a local fake broker."""
 import importlib
 import json
+import socket
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import socketserver
+import struct
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -81,11 +82,13 @@ def test_unknown_gear_keeps_the_last_gear_and_reverse_counts_as_driving():
   assert tr.gear == "reverse"
 
 
-def test_location_payload_uses_m_per_s_and_omits_speed_course_when_stopped():
-  moving = ha_pushd.location_payload({"fix": FIX, "speed_ms": 20.4})
-  assert moving == {"gps": [43.65, -79.38], "gps_accuracy": 4, "speed": 20, "course": 272, "altitude": 120}
-  stopped = ha_pushd.location_payload({"fix": (43.65, -79.38, 0.4, 0.0, 12.0), "speed_ms": 0.0})
-  assert stopped == {"gps": [43.65, -79.38], "gps_accuracy": 1}
+def test_payloads_are_compact_json_with_what_ha_needs():
+  loc = json.loads(ha_pushd.location_payload({"fix": FIX, "speed_ms": 20.4}))
+  assert loc == {"latitude": 43.65, "longitude": -79.38, "gps_accuracy": 4, "altitude": 120.0, "course": 272, "speed_ms": 20.4}
+  assert json.loads(ha_pushd.location_payload({"fix": (43.65, -79.38, 0.4, 0.0, 12.0), "speed_ms": 0.0}))["gps_accuracy"] == 1
+  state = json.loads(ha_pushd.state_payload({"speed_kmh": 72.04, "drive_state": "driving", "gear": "low", "started": True, "fix_age_s": 0.5}))
+  assert state == {"speed_kmh": 72.0, "drive_state": "driving", "gear": "low", "ignition": True, "fix_age_s": 0.5}
+  assert len(ha_pushd.state_payload({"speed_kmh": 72.04, "drive_state": "driving", "gear": "low", "started": True, "fix_age_s": 0.5})) < 100
 
 
 def test_no_wall_clock_in_the_daemon():
@@ -93,79 +96,136 @@ def test_no_wall_clock_in_the_daemon():
   assert "time.time(" not in inspect.getsource(ha_pushd)
 
 
-# ----------------------------------------------------------------------------- Sender
+# ----------------------------------------------------------------------------- Sender (MQTT)
 
-class _FakeHA:
-  """Mimics HA's mobile_app webhook: an unknown webhook id gets 200 with an empty body for
-  everything; a known one answers get_config with JSON and reports per-sensor results."""
+class _FakeBroker:
+  """Enough MQTT 3.1.1 to serve a publish-only client: CONNECT/CONNACK (auth check), PUBLISH
+  (recorded), PINGREQ/PINGRESP, DISCONNECT. Connections can be dropped to simulate a dead link."""
 
-  def __init__(self):
-    self.known = True
-    self.reject_next_update = False
-    self.posts = []
+  def __init__(self, password="pw"):
+    self.password = password
+    self.connects, self.publishes, self.pings = [], [], 0
     self.lock = threading.Lock()
-    fake = self
+    self.conns = []
+    broker = self
 
-    class Handler(BaseHTTPRequestHandler):
-      def log_message(self, *_a):
-        pass
+    class Handler(socketserver.BaseRequestHandler):
+      def _exact(self, n):
+        buf = b""
+        while len(buf) < n:
+          chunk = self.request.recv(n - len(buf))
+          if not chunk:
+            raise ConnectionError
+          buf += chunk
+        return buf
 
-      def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        with fake.lock:
-          fake.posts.append(body)
-          known, reject = fake.known, fake.reject_next_update
-        if not known:
-          self.send_response(200)
-          self.send_header("Content-Length", "0")
-          self.end_headers()
+      def _packet(self):
+        ptype = self._exact(1)[0]
+        length, mult = 0, 1
+        while True:
+          d = self._exact(1)[0]
+          length += (d & 0x7F) * mult
+          mult *= 128
+          if not d & 0x80:
+            break
+        return ptype, self._exact(length)
+
+      def handle(self):
+        with broker.lock:
+          broker.conns.append(self.request)
+        try:
+          while True:
+            ptype, body = self._packet()
+            kind = ptype & 0xF0
+            if kind == 0x10:
+              i = 0
+              (n,) = struct.unpack("!H", body[i:i + 2])
+              i += 2 + n                                            # protocol name
+              flags = body[i + 1]
+              keepalive = struct.unpack("!H", body[i + 2:i + 4])[0]
+              i += 4
+              fields = []
+              while i < len(body):                                  # length-prefixed payload fields
+                (n,) = struct.unpack("!H", body[i:i + 2])
+                fields.append(body[i + 2:i + 2 + n])
+                i += 2 + n
+              rec = {"client_id": fields.pop(0).decode(), "keepalive": keepalive, "will": None, "username": None, "password": None}
+              if flags & 0x04:
+                rec["will"] = (fields.pop(0).decode(), fields.pop(0), bool(flags & 0x20))
+              if flags & 0x80:
+                rec["username"] = fields.pop(0).decode()
+              if flags & 0x40:
+                rec["password"] = fields.pop(0).decode()
+              with broker.lock:
+                broker.connects.append(rec)
+              rc = 0 if rec["password"] == broker.password else 5
+              self.request.sendall(bytes([0x20, 2, 0, rc]))
+              if rc:
+                return
+            elif kind == 0x30:
+              qos = (ptype >> 1) & 0x03
+              (n,) = struct.unpack("!H", body[:2])
+              topic, rest = body[2:2 + n].decode(), body[2 + n:]
+              packet_id, rest = (rest[:2], rest[2:]) if qos else (None, rest)
+              with broker.lock:
+                broker.publishes.append((topic, rest, bool(ptype & 0x01)))
+              if qos:
+                self.request.sendall(bytes([0x40, 2]) + packet_id)
+            elif kind == 0xC0:
+              with broker.lock:
+                broker.pings += 1
+              self.request.sendall(bytes([0xD0, 0]))
+            elif kind == 0xE0:
+              return
+        except (ConnectionError, OSError):
           return
-        t = body["type"]
-        if t == "get_config":
-          reply, code = {"version": "2026.9.0", "location_name": "Home"}, 200
-        elif t == "register_sensor":
-          reply, code = {"success": True}, 201
-        elif t == "update_location":
-          reply, code = {}, 200
-        elif t == "update_sensor_states":
-          reply = {d["unique_id"]: {"success": True} for d in body["data"]}
-          if reject:
-            reply["car_speed"] = {"success": False, "error": {"code": "not_registered", "message": "Entity is not registered"}}
-            with fake.lock:
-              fake.reject_next_update = False
-          code = 200
-        else:
-          reply, code = {}, 400
-        raw = json.dumps(reply).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
 
-    self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    class Server(socketserver.ThreadingTCPServer):
+      allow_reuse_address = True
+      daemon_threads = True
+
+    self.server = Server(("127.0.0.1", 0), Handler)
     threading.Thread(target=self.server.serve_forever, daemon=True).start()
-    self.url = f"http://127.0.0.1:{self.server.server_port}/api/webhook/abc"
+    self.port = self.server.server_address[1]
 
-  def types(self):
+  def cfg(self, password="pw"):
+    return {"host": "127.0.0.1", "port": self.port, "username": "ha", "password": password}
+
+  def topics(self):
     with self.lock:
-      return [p["type"] for p in self.posts]
+      return [t for t, _, _ in self.publishes]
+
+  def last(self, topic):
+    with self.lock:
+      return next((json.loads(p) if p[:1] == b"{" else p.decode() for t, p, _ in reversed(self.publishes) if t == topic), None)
+
+  def drop_connections(self):
+    with self.lock:
+      conns, self.conns = self.conns, []
+    for c in conns:
+      try:
+        c.shutdown(socket.SHUT_RDWR)
+      except OSError:
+        pass
+      c.close()
 
   def close(self):
     self.server.shutdown()
 
 
+
 @pytest.fixture
-def ha():
-  fake = _FakeHA()
-  yield fake
-  fake.close()
+def broker():
+  b = _FakeBroker()
+  yield b
+  b.close()
 
 
 @pytest.fixture(autouse=True)
 def fast_backoff(monkeypatch):
   monkeypatch.setattr(ha_pushd, "RETRY_MIN_S", 0.05)
   monkeypatch.setattr(ha_pushd, "RETRY_MAX_S", 0.2)
+  monkeypatch.setattr(ha_pushd, "CONNECT_TIMEOUT_S", 2.0)
   # capture the daemon's log lines whether the real cloudlog or a stub was imported
   monkeypatch.setattr(ha_pushd, "cloudlog", SimpleNamespace(warning=_log.warnings.append, info=_log.infos.append))
   _log.warnings.clear()
@@ -188,66 +248,82 @@ def _snapshot(**kw):
   return s
 
 
-def test_sender_registers_with_concrete_states_then_pushes(ha):
-  sender = Sender(ha.url)
+def test_sender_connects_with_auth_and_will_then_publishes_discovery_and_state(broker):
+  sender = Sender(broker.cfg())
   sender.start()
   sender.submit(_snapshot())
-  assert _wait(lambda: sender.pending is None)
-  assert ha.types() == ["get_config", "register_sensor", "register_sensor", "register_sensor", "update_location", "update_sensor_states"]
-  regs = [p["data"] for p in ha.posts if p["type"] == "register_sensor"]
-  assert all(r["state"] is not None for r in regs)
-  assert not any(r.get("device_class") == "enum" for r in regs)
-  loc = next(p["data"] for p in ha.posts if p["type"] == "update_location")
-  assert loc["speed"] == 20 and loc["gps"] == [43.65, -79.38]
-  states = {d["unique_id"]: d["state"] for d in next(p["data"] for p in ha.posts if p["type"] == "update_sensor_states")}
-  assert states == {"car_speed": 72.0, "car_drive_state": "driving", "car_ignition": True}
+  assert _wait(lambda: broker.last("car/state") is not None)
+  con = broker.connects[0]
+  assert con["username"] == "ha" and con["password"] == "pw" and con["client_id"] == "comma3-car"
+  assert con["will"] == ("car/availability", b"offline", True) and con["keepalive"] == ha_pushd.KEEPALIVE_S
+  topics = broker.topics()
+  configs = [t for t in topics if t.startswith("homeassistant/")]
+  assert configs == [f"homeassistant/{c}/car/{o}/config" for c, o, _ in ha_pushd.DISCOVERY]
+  assert topics.index("car/availability") < topics.index("car/location") < topics.index("car/state")
+  assert all(retain for _, _, retain in broker.publishes)
+  assert sender.client.packet_id == len(broker.publishes)          # every publish was QoS 1 and acknowledged
+  tracker_cfg = broker.last("homeassistant/device_tracker/car/tracker/config")
+  assert tracker_cfg["json_attributes_topic"] == "car/location" and tracker_cfg["device"]["identifiers"] == ["comma3_car"]
+  assert broker.last("car/location")["latitude"] == 43.65
+  assert broker.last("car/state") == {"speed_kmh": 72.0, "drive_state": "driving", "gear": "drive", "ignition": True, "fix_age_s": 0.5}
+  assert broker.last("car/availability") == "online"
   assert not _log.warnings
 
   sender.submit(_snapshot(speed_ms=0.0, speed_kmh=0.0, fix=None, drive_state="parked", gear="park"))
-  assert _wait(lambda: sender.pending is None)
-  assert ha.types()[6:] == ["update_sensor_states"]          # registered once, no location without a fix
+  assert _wait(lambda: broker.last("car/state")["drive_state"] == "parked")
+  assert broker.topics().count("car/location") == 1              # no location without a fix, and no re-discovery
 
 
-def test_sender_refuses_an_unknown_webhook_backs_off_and_logs_once(ha):
-  ha.known = False
-  sender = Sender(ha.url)
+def test_sender_reconnects_after_a_dropped_link_and_republishes_last_state(broker):
+  sender = Sender(broker.cfg())
+  sender.start()
+  sender.submit(_snapshot())
+  assert _wait(lambda: broker.last("car/state") is not None)
+  n_pub = len(broker.publishes)
+
+  broker.drop_connections()
+  sender.submit(_snapshot(speed_ms=10.0, speed_kmh=36.0, fix=None))   # arrives on a dead socket
+  assert _wait(lambda: len(broker.connects) >= 2 and broker.last("car/state")["speed_kmh"] == 36.0)
+  assert len(_log.warnings) == 1 and "session lost" in _log.warnings[0]
+  assert _wait(lambda: len(_log.infos) >= 1 and "recovered" in _log.infos[-1])
+  assert not sender.failing and sender.retry_s == pytest.approx(0.05)
+  new = broker.publishes[n_pub:]
+  assert [t for t, _, _ in new if t.startswith("homeassistant/")]     # discovery re-published on reconnect
+  assert broker.last("car/location")["latitude"] == 43.65             # last snapshot's fix carried over
+
+
+def test_sender_backs_off_and_logs_once_when_the_broker_refuses(broker):
+  sender = Sender(broker.cfg(password="wrong"))
   sender.start()
   sender.submit(_snapshot())
   assert _wait(lambda: sender.failures >= 3)
-  assert sender.registered is False
-  assert set(ha.types()) == {"get_config"}                      # never registers or pushes into the void
-  assert len(_log.warnings) == 1 and "not registered" in _log.warnings[0]
-  assert sender.retry_s == pytest.approx(0.2)                   # backed off to the cap
-
-  ha.known = True                                               # config fixed on the HA side: recovers on its own
-  assert _wait(lambda: sender.pending is None)
-  assert sender.registered and not sender.failing and sender.retry_s == pytest.approx(0.05)
+  assert len(_log.warnings) == 1 and "not authorized" in _log.warnings[0]
+  assert sender.retry_s == pytest.approx(0.2)
+  assert broker.publishes == []
+  sender.cfg["password"] = "pw"
+  sender.client.password = "pw"
+  assert _wait(lambda: broker.last("car/state") is not None)
   assert len(_log.warnings) == 1 and len(_log.infos) == 1
 
 
-def test_sender_reregisters_when_ha_reports_a_sensor_not_registered(ha):
-  sender = Sender(ha.url)
+def test_sender_pings_when_idle(broker, monkeypatch):
+  monkeypatch.setattr(ha_pushd, "PING_IDLE_S", 0.1)
+  sender = Sender(broker.cfg())
   sender.start()
   sender.submit(_snapshot())
-  assert _wait(lambda: sender.pending is None)
-  ha.reject_next_update = True
-  sender.submit(_snapshot(speed_ms=10.0, speed_kmh=36.0, fix=None))
-  assert _wait(lambda: sender.pending is None)
-  assert ha.types().count("register_sensor") == 6
-  assert ha.types()[-1] == "update_sensor_states" and ha.types()[-2:-1] == ["register_sensor"]
-  assert len(_log.warnings) == 1 and "re-registering" in _log.warnings[0]
+  assert _wait(lambda: broker.pings >= 2, timeout=2.0)
+  assert not sender.failing
 
 
-def test_newer_snapshot_supersedes_a_failing_one_without_waiting_out_the_backoff(ha):
-  ha.known = False
-  sender = Sender(ha.url)
+def test_newer_snapshot_supersedes_a_pending_one_and_cuts_the_backoff_short(broker):
+  sender = Sender(broker.cfg(password="wrong"))
   sender.start()
   sender.submit(_snapshot(drive_state="driving"))
   assert _wait(lambda: sender.failures >= 2)
-  ha.known = True
+  sender.cfg["password"] = "pw"
+  sender.client.password = "pw"
   t0 = time.monotonic()
   sender.submit(_snapshot(drive_state="parked", gear="park", speed_ms=0.0, speed_kmh=0.0))
-  assert _wait(lambda: sender.pending is None)
-  assert time.monotonic() - t0 < 0.15                            # the notify cut the 0.2 s backoff short
-  sent = [d["state"] for p in ha.posts if p["type"] == "update_sensor_states" for d in p["data"] if d["unique_id"] == "car_drive_state"]
-  assert sent == ["parked"]
+  assert _wait(lambda: broker.last("car/state") is not None)
+  assert time.monotonic() - t0 < 0.15
+  assert [json.loads(p)["drive_state"] for t, p, _ in broker.publishes if t == "car/state"] == ["parked"]

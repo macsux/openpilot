@@ -1,49 +1,47 @@
 #!/usr/bin/env python3
-"""Push the car's position and drive state to Home Assistant.
+"""Push the car's position and drive state to Home Assistant over MQTT.
 
-The device is registered in HA as a mobile_app device ("Car"), so every push is
-an unauthenticated POST to /api/webhook/<webhook_id> — the webhook id is the
-secret. Config lives in /data/ha_push.json rather than a param, because a new
-param key needs a rebuild of the committed params_pyx.so:
+One persistent MQTT session over Tailscale to the Mosquitto broker on the Mac (the one
+HA's MQTT integration already uses); every publish is QoS 1, so a dead link shows up on
+the next update rather than at the next keepalive. Entities are created by HA MQTT discovery under a
+single "Car" device, so nothing is configured on the HA side. Config lives in
+/data/ha_push.json rather than a param, because a new param key needs a rebuild of the
+committed params_pyx.so, and it is never committed (public repo):
 
-  {"url": "https://ha.almirex.com", "webhook_id": "<id from registration>"}
+  {"host": "<Mac tailscale IP>", "port": 1883, "username": "ha", "password": "<mqtt_password from HA secrets.yaml>"}
 
-What is sent:
-  * device_tracker.car          — lat/lon, accuracy, speed (m/s: what update_location takes), course, altitude
-  * sensor.car_speed            — km/h
-  * sensor.car_drive_state      — driving | parked
-  * binary_sensor.car_ignition  — deviceState.started
+Why MQTT and not the mobile_app webhook it replaced: every update is a ~100-byte PUBLISH
+on an already-open socket instead of two HTTPS POSTs with headers, so the cellular cost
+of a 15 s cadence drops by roughly an order of magnitude, and a dropped link is detected
+by the keepalive rather than discovered on the next POST.
 
-Cadence: every PUSH_INTERVAL_S while onroad, and IMMEDIATELY on a drive <-> park
-change or an ignition edge. Arriving somewhere means shifting to park and then
-switching the car off, which takes the phone hotspot (and this device's power,
-depending on the harness) with it — so the park transition is sent the moment
-the gear changes, from a sender thread that retries with backoff, and the main
-loop never waits on the network.
+Topics (all retained, so HA still shows the last state after the car powers off):
+  car/state         {"speed_kmh", "drive_state": driving|parked, "gear", "ignition", "fix_age_s"}
+  car/location      {"latitude", "longitude", "gps_accuracy", "altitude", "course", "speed_ms"}
+  car/availability  online | offline (offline is the broker-sent last will)
+  homeassistant/<component>/car/<object_id>/config   discovery, published on every connect
 
-Failure handling: HA answers 200 with an EMPTY body for a webhook id it doesn't
-know, so a bad config would otherwise push into the void forever. The sender
-therefore asks for get_config first (a registered device answers with JSON) and
-refuses to run until that succeeds. Per-sensor errors come back inside a 200 as
-well; a sensor HA no longer knows (device deleted and re-added) is re-registered.
-Retries back off 2 s -> 60 s and log once per failure streak, not per attempt:
-parked in a garage with no hotspot is the normal state until the device powers down.
+Cadence: every PUSH_INTERVAL_S while onroad, and IMMEDIATELY on a drive <-> park change
+or an ignition edge. Arriving somewhere means shifting to park and then switching the
+car off, which takes the phone hotspot (and this device's power, depending on the
+harness) with it, so the park transition goes out the moment the gear changes, from a
+sender thread that owns the socket; the main loop never waits on the network.
 
-Only the monotonic clock is used for timing. The device's wall clock is bogus at
-boot and jumps when it syncs, which would make a fresh fix look ancient (never
-sent) or a stale one look fresh.
+Failure handling: on any socket or broker error the sender drops the session, backs off
+2 s -> 60 s (logging once per failure streak), reconnects, re-publishes discovery and the
+last snapshot. Only the monotonic clock is used: the device's wall clock is bogus at boot
+and jumps when it syncs.
 """
 import json
 import threading
 import time
-
-import requests
 
 from cereal import car, messaging
 
 from openpilot.common.gps import get_gps_location_service
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
+from openpilot.starpilot.system.mqtt_min import MqttClient
 
 CONFIG_PATH = "/data/ha_push.json"
 
@@ -52,19 +50,41 @@ OFFROAD_INTERVAL_S = 600.  # keep HA's "parked / ignition off" fresh while the d
 RETRY_MIN_S = 2.
 RETRY_MAX_S = 60.
 GPS_MAX_AGE_S = 5.         # a fix older than this is not sent as a fresh onroad position
-HTTP_TIMEOUT = (3., 5.)    # connect, read
-MOVING_MIN_SPEED = 1.0     # m/s; update_location's speed/course are only meaningful (and only accepted > 0) when moving
+KEEPALIVE_S = 600          # MQTT keepalive: the broker declares us dead (and sends the will) after 1.5x this
+PING_IDLE_S = 240.         # send a PINGREQ when nothing has been published for this long
+CONNECT_TIMEOUT_S = 10.
+
+CLIENT_ID = "comma3-car"
+DISCOVERY_PREFIX = "homeassistant"
+TOPIC_STATE = "car/state"
+TOPIC_LOCATION = "car/location"
+TOPIC_AVAILABILITY = "car/availability"
 
 GearShifter = car.CarState.GearShifter
 
-# Registered with concrete initial states: a null state is the one thing that could make
-# registration fail on every start and leave the daemon stuck before its first push.
-SENSORS = [
-  {"type": "sensor", "unique_id": "car_speed", "name": "Speed", "icon": "mdi:speedometer",
-   "device_class": "speed", "unit_of_measurement": "km/h", "state_class": "measurement", "state": 0},
-  {"type": "sensor", "unique_id": "car_drive_state", "name": "Drive state", "icon": "mdi:car", "state": "parked"},
-  {"type": "binary_sensor", "unique_id": "car_ignition", "name": "Ignition", "icon": "mdi:engine",
-   "device_class": "power", "state": False},
+DEVICE = {"identifiers": ["comma3_car"], "name": "Car", "manufacturer": "comma", "model": "comma 3"}
+# (component, object_id, config): one HA device, entity ids car / car_speed / car_drive_state / car_ignition / car_online
+DISCOVERY = [
+  ("device_tracker", "tracker", {
+    "name": None, "unique_id": "car_tracker", "json_attributes_topic": TOPIC_LOCATION, "source_type": "gps", "icon": "mdi:car",
+  }),
+  ("sensor", "speed", {
+    "name": "Speed", "unique_id": "car_speed", "state_topic": TOPIC_STATE, "value_template": "{{ value_json.speed_kmh }}",
+    "unit_of_measurement": "km/h", "device_class": "speed", "state_class": "measurement", "icon": "mdi:speedometer",
+  }),
+  ("sensor", "drive_state", {
+    "name": "Drive state", "unique_id": "car_drive_state", "state_topic": TOPIC_STATE, "value_template": "{{ value_json.drive_state }}",
+    "json_attributes_topic": TOPIC_STATE, "json_attributes_template": "{{ {'gear': value_json.gear, 'fix_age_s': value_json.fix_age_s} | tojson }}",
+    "icon": "mdi:car",
+  }),
+  ("binary_sensor", "ignition", {
+    "name": "Ignition", "unique_id": "car_ignition", "state_topic": TOPIC_STATE,
+    "value_template": "{{ 'ON' if value_json.ignition else 'OFF' }}", "device_class": "power", "icon": "mdi:engine",
+  }),
+  ("binary_sensor", "online", {
+    "name": "Device online", "unique_id": "car_online", "state_topic": TOPIC_AVAILABILITY,
+    "payload_on": "online", "payload_off": "offline", "device_class": "connectivity",
+  }),
 ]
 
 
@@ -72,43 +92,38 @@ def load_config(path=CONFIG_PATH):
   try:
     with open(path) as f:
       cfg = json.load(f)
-    return f"{cfg['url'].rstrip('/')}/api/webhook/{cfg['webhook_id']}"
+    return {"host": cfg["host"], "port": int(cfg.get("port", 1883)), "username": cfg.get("username"), "password": cfg.get("password")}
   except Exception:
     return None
 
 
+def state_payload(s):
+  return json.dumps({
+    "speed_kmh": round(s["speed_kmh"], 1), "drive_state": s["drive_state"], "gear": s["gear"],
+    "ignition": bool(s["started"]), "fix_age_s": s["fix_age_s"],
+  }, separators=(",", ":"))
+
+
 def location_payload(s):
   lat, lon, acc, alt, course = s["fix"]
-  data = {"gps": [lat, lon], "gps_accuracy": max(1, int(round(acc)))}
-  if s["speed_ms"] >= MOVING_MIN_SPEED:
-    data["speed"] = int(round(s["speed_ms"]))
-    data["course"] = int(round(course)) % 360
-  if alt > 0.:
-    data["altitude"] = int(round(alt))
-  return data
-
-
-def sensor_states(s):
-  return [
-    {"type": "sensor", "unique_id": "car_speed", "state": round(s["speed_kmh"], 1), "icon": "mdi:speedometer"},
-    {"type": "sensor", "unique_id": "car_drive_state", "state": s["drive_state"],
-     "icon": "mdi:car-arrow-right" if s["drive_state"] == "driving" else "mdi:car-brake-parking",
-     "attributes": {"gear": s["gear"], "fix_age_s": s["fix_age_s"]}},
-    {"type": "binary_sensor", "unique_id": "car_ignition", "state": s["started"], "icon": "mdi:engine"},
-  ]
+  return json.dumps({
+    "latitude": round(lat, 6), "longitude": round(lon, 6), "gps_accuracy": max(1, int(round(acc))),
+    "altitude": round(alt, 1), "course": int(round(course)) % 360, "speed_ms": round(s["speed_ms"], 1),
+  }, separators=(",", ":"))
 
 
 class Sender(threading.Thread):
-  """Latest-wins: each snapshot carries the full state, so a newer one always
-  supersedes an unsent older one and a transition can never be lost behind it."""
+  """Owns the MQTT session. Latest-wins: each snapshot carries the full state, so a newer one
+  always supersedes an unsent older one and a transition can never be lost behind it."""
 
-  def __init__(self, url):
+  def __init__(self, cfg):
     super().__init__(daemon=True)
-    self.url = url
-    self.session = requests.Session()
+    self.cfg = cfg
+    self.client = MqttClient(cfg["host"], cfg["port"], cfg["username"], cfg["password"], CLIENT_ID,
+                             keepalive_s=KEEPALIVE_S, will=(TOPIC_AVAILABILITY, b"offline", True), timeout_s=CONNECT_TIMEOUT_S)
     self.cv = threading.Condition()
     self.pending = None
-    self.registered = False
+    self.last_sent = None
     self.failing = False
     self.failures = 0
     self.retry_s = RETRY_MIN_S
@@ -118,67 +133,61 @@ class Sender(threading.Thread):
       self.pending = snapshot
       self.cv.notify()
 
-  def _post(self, body):
-    r = self.session.post(self.url, json=body, timeout=HTTP_TIMEOUT)
-    r.raise_for_status()
-    return r
+  def _connect(self):
+    self.client.connect()
+    for component, object_id, config in DISCOVERY:
+      self.client.publish(f"{DISCOVERY_PREFIX}/{component}/car/{object_id}/config", json.dumps({**config, "device": DEVICE}))
+    self.client.publish(TOPIC_AVAILABILITY, b"online")
+    if self.last_sent is not None:
+      self._publish(self.last_sent)
 
-  @staticmethod
-  def _json(r):
-    try:
-      return r.json()
-    except ValueError:
-      return None
-
-  def _register(self):
-    cfg = self._json(self._post({"type": "get_config", "data": {}}))
-    if not isinstance(cfg, dict) or not cfg:
-      raise RuntimeError("webhook id is not registered in Home Assistant (empty get_config reply)")
-    for sensor in SENSORS:
-      self._post({"type": "register_sensor", "data": sensor})
-    self.registered = True
-
-  def _send(self, s):
-    if not self.registered:
-      self._register()
-
+  def _publish(self, s):
     if s["fix"] is not None:
-      self._post({"type": "update_location", "data": location_payload(s)})
+      self.client.publish(TOPIC_LOCATION, location_payload(s))
+    self.client.publish(TOPIC_STATE, state_payload(s))
 
-    results = self._json(self._post({"type": "update_sensor_states", "data": sensor_states(s)}))
-    if isinstance(results, dict):
-      rejected = {k: v for k, v in results.items() if isinstance(v, dict) and v.get("success") is False}
-      if rejected:
-        self.registered = False
-        raise RuntimeError(f"sensor update rejected, re-registering: {rejected}")
+  def _take_pending(self, timeout):
+    with self.cv:
+      if self.pending is None:
+        self.cv.wait(timeout)
+      snapshot, self.pending = self.pending, None
+    return snapshot
+
+  def _restore_pending(self, snapshot):
+    with self.cv:
+      if self.pending is None:
+        self.pending = snapshot
 
   def run(self):
     while True:
-      with self.cv:
-        while self.pending is None:
-          self.cv.wait()
-        snapshot = self.pending
-
+      snapshot = None
       try:
-        self._send(snapshot)
+        if not self.client.connected:
+          self._connect()
+        snapshot = self._take_pending(max(0.5, PING_IDLE_S - self.client.idle_s()))
+        if snapshot is not None:
+          self._publish(snapshot)
+          self.last_sent = snapshot
+        elif self.client.idle_s() >= PING_IDLE_S:
+          self.client.ping()
       except Exception as e:
+        self.client.close(send_disconnect=False)
+        if snapshot is not None:
+          self._restore_pending(snapshot)
         if not self.failing:
-          cloudlog.warning(f"ha_pushd: push failed ({e}); retrying, backing off up to {RETRY_MAX_S:.0f}s")
+          cloudlog.warning(f"ha_pushd: mqtt session lost ({e}); reconnecting, backing off up to {RETRY_MAX_S:.0f}s")
         self.failing = True
         self.failures += 1
         with self.cv:
-          # a newer snapshot cuts the wait short; otherwise retry this one after the backoff
-          if self.pending is snapshot:
+          # a newer snapshot cuts the wait short; it is sent right after the reconnect
+          if self.pending is None:
             self.cv.wait(self.retry_s)
         self.retry_s = min(self.retry_s * 2., RETRY_MAX_S)
         continue
 
       if self.failing:
-        cloudlog.info(f"ha_pushd: push recovered after {self.failures} failed attempts")
+        cloudlog.info(f"ha_pushd: mqtt session recovered after {self.failures} failed attempts")
       self.failing, self.failures, self.retry_s = False, 0, RETRY_MIN_S
-      with self.cv:
-        if self.pending is snapshot:
-          self.pending = None
 
 
 class Tracker:
@@ -255,15 +264,15 @@ def load_seed(params):
 def main():
   params = Params()
 
-  url = load_config()
-  if url is None:
-    cloudlog.warning(f"ha_pushd: no config at {CONFIG_PATH} ({{\"url\", \"webhook_id\"}}); nothing is pushed until it appears")
-  while url is None:
+  cfg = load_config()
+  if cfg is None:
+    cloudlog.warning(f"ha_pushd: no config at {CONFIG_PATH} ({{\"host\", \"port\", \"username\", \"password\"}}); nothing is pushed until it appears")
+  while cfg is None:
     time.sleep(60)
-    url = load_config()
-  cloudlog.info(f"ha_pushd: pushing to {url.rsplit('/', 1)[0]}/<webhook>")
+    cfg = load_config()
+  cloudlog.info(f"ha_pushd: publishing to mqtt://{cfg['host']}:{cfg['port']} as {cfg['username']}")
 
-  sender = Sender(url)
+  sender = Sender(cfg)
   sender.start()
 
   gps_service = get_gps_location_service(params)

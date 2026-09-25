@@ -42,6 +42,15 @@ HOURS_NO_CONNECTIVITY_PROMPT = 24 * 365 * 100
 ROUTES_NO_CONNECTIVITY_PROMPT = 9001
 
 
+# macsux: the car powers this device only while the ignition is on, so that is when updates can be
+# downloaded. Fetch/apply/finalize therefore run onroad (at nice 19: see process_config); only the
+# AGNOS flash still waits for offroad, and the install itself always happens at the next boot.
+UPDATE_CHECK_INTERVAL_S = 60 * 60
+# The hotspot is the car's only network and reports itself as metered, so honouring the metered
+# throttle would delay every download by up to 3 days.
+FETCH_ON_METERED = True
+
+
 class UserRequest:
   NONE = 0
   CHECK = 1
@@ -78,38 +87,6 @@ def write_time_to_param(params, param) -> None:
 
 def run(cmd: list[str], cwd: str = None) -> str:
   return subprocess.check_output(cmd, cwd=cwd, stderr=subprocess.STDOUT, encoding='utf8')
-
-
-def run_with_offroad_abort(cmd: list[str], params: Params, cwd: str = None, poll_interval: float = 0.5) -> str:
-  proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-  output: list[str] = []
-
-  try:
-    while True:
-      try:
-        stdout, _ = proc.communicate(timeout=poll_interval)
-        if stdout:
-          output.append(stdout)
-        if proc.returncode:
-          raise subprocess.CalledProcessError(proc.returncode, cmd, ''.join(output))
-        return ''.join(output)
-      except subprocess.TimeoutExpired:
-        if not params.get_bool("IsOffroad"):
-          proc.terminate()
-          try:
-            stdout, _ = proc.communicate(timeout=5)
-            if stdout:
-              output.append(stdout)
-          except subprocess.TimeoutExpired:
-            proc.kill()
-            stdout, _ = proc.communicate()
-            if stdout:
-              output.append(stdout)
-          raise UpdateAborted(f"aborted {' '.join(cmd)} because vehicle went onroad")
-  finally:
-    if proc.poll() is None:
-      proc.kill()
-      proc.communicate()
 
 
 def set_consistent_flag(consistent: bool) -> None:
@@ -406,7 +383,6 @@ class Updater:
       raise UpdateAborted(f"{context} blocked because vehicle is onroad")
 
   def fetch_update(self) -> None:
-    self.require_offroad("update fetch")
     cloudlog.info("attempting git fetch inside staging overlay")
 
     self.params.put("UpdaterState", "downloading...")
@@ -420,7 +396,7 @@ class Updater:
     run(["git", "config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], OVERLAY_MERGED)
 
     branch = self.target_branch
-    git_fetch_output = run_with_offroad_abort(["git", "fetch", "origin", branch], self.params, OVERLAY_MERGED)
+    git_fetch_output = run(["git", "fetch", "origin", branch], OVERLAY_MERGED)
     cloudlog.info("git fetch success: %s", git_fetch_output)
 
     cloudlog.info("git reset in progress")
@@ -435,8 +411,7 @@ class Updater:
     ]
     r = []
     for cmd in cmds:
-      self.require_offroad("update apply")
-      r.append(run_with_offroad_abort(cmd, self.params, OVERLAY_MERGED))
+      r.append(run(cmd, OVERLAY_MERGED))
     cloudlog.info("git reset success: %s", '\n'.join(r))
 
     # TODO: show agnos download progress
@@ -445,7 +420,6 @@ class Updater:
       handle_agnos_update()
 
     # Create the finalized, ready-to-swap update
-    self.require_offroad("update finalization")
     self.params.put("UpdaterState", "finalizing update...")
     finalize_update()
     cloudlog.info("finalize success!")
@@ -521,7 +495,7 @@ def main() -> None:
 
         update_failed_count += 1
 
-        should_check = manual_update_requested or user_requested_action or (params.get_bool("IsOffroad") and automatic_updates_enabled)
+        should_check = manual_update_requested or user_requested_action or automatic_updates_enabled
         if should_check:
           # check for update
           params.put("UpdaterState", "checking...")
@@ -531,20 +505,15 @@ def main() -> None:
           last_fetch = params.get("UpdaterLastFetchTime")
           timed_out = last_fetch is None or (datetime.datetime.now(datetime.UTC).replace(tzinfo=None) - last_fetch > datetime.timedelta(days=3))
           user_requested_fetch = wait_helper.user_request == UserRequest.FETCH
-          if params.get_bool("NetworkMetered") and not timed_out and not user_requested_fetch:
+          if params.get_bool("NetworkMetered") and not FETCH_ON_METERED and not timed_out and not user_requested_fetch:
             cloudlog.info("skipping fetch, connection metered")
           elif wait_helper.user_request == UserRequest.CHECK:
             cloudlog.info("skipping fetch, only checking")
-          elif not params.get_bool("IsOffroad"):
-            cloudlog.info("skipping fetch, vehicle went onroad")
           else:
             updater.fetch_update()
             write_time_to_param(params, "UpdaterLastFetchTime")
         else:
-          if not params.get_bool("IsOffroad"):
-            cloudlog.info("skipping fetch, vehicle is onroad")
-          else:
-            cloudlog.info("skipping fetch, automatic updates disabled")
+          cloudlog.info("skipping fetch, automatic updates disabled")
         update_failed_count = 0
       except subprocess.CalledProcessError as e:
         cloudlog.event(
@@ -571,9 +540,9 @@ def main() -> None:
       except Exception:
         cloudlog.exception("uncaught updated exception while setting params, shouldn't happen")
 
-      # infrequent attempts if we successfully updated recently
+      # check again in an hour (a check is two git ls-remote calls); a signal from the UI wakes it sooner
       wait_helper.user_request = UserRequest.NONE
-      wait_helper.sleep(60*60*24*365*100)
+      wait_helper.sleep(UPDATE_CHECK_INTERVAL_S)
 
 
 if __name__ == "__main__":

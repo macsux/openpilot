@@ -227,7 +227,8 @@ class ParamsBaseUpdateTest(TestBaseUpdate):
       self._test_params("master", False, True)
       self._test_finalized_update("master", *self.MOCK_RELEASES["master"])
 
-  def test_download_blocked_onroad(self):
+  def test_download_proceeds_onroad(self):
+    # macsux: the car only powers the device while driving, so downloads must not wait for offroad
     self.setup_remote_release("release3")
     self.setup_basedir_release("release3")
 
@@ -243,8 +244,35 @@ class ParamsBaseUpdateTest(TestBaseUpdate):
 
       self.params.put_bool("IsOffroad", False)
       self.send_download_signal(updated)
+      self.wait_for_update_available()
+
+      self._test_params("release3", False, True)
+      self._test_finalized_update("release3", *self.MOCK_RELEASES["release3"])
+
+  def test_agnos_update_waits_for_offroad(self, mocker):
+    # the openpilot part may download onroad, but an AGNOS flash still waits for the car to be off
+    self.setup_remote_release("release3")
+    self.setup_basedir_release("release3")
+
+    with self.additional_context(), processes_context(["updated"]) as [updated]:
+      mocker.patch("openpilot.system.hardware.AGNOS", "True")
+      mocker.patch("openpilot.system.hardware.tici.hardware.Tici.get_os_version", "1.2")
+      mocker.patch("openpilot.system.hardware.tici.agnos.get_target_slot_number")
+      flash = mocker.patch("openpilot.system.hardware.tici.agnos.flash_agnos_update")
+
       self.wait_for_idle()
 
+      self.MOCK_RELEASES["release3"] = ("0.1.3", "1.3", "0.1.3 release notes")
+      self.update_remote_release("release3")
+
+      self.send_check_for_updates_signal(updated)
+      self.wait_for_fetch_available()
+
+      self.params.put_bool("IsOffroad", False)
+      self.send_download_signal(updated)
+      self.wait_for_idle()
+
+      flash.assert_not_called()
       assert not self.params.get_bool("UpdateAvailable")
       assert not get_consistent_flag(str(self.staging_root / "finalized"))
 
